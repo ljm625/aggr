@@ -7,6 +7,8 @@ export interface Bar {
   csell?: number
   lbuy?: number
   lsell?: number
+  oi?: number | null
+  doi?: number
   time?: number
   open?: number
   high?: number
@@ -16,6 +18,17 @@ export interface Bar {
   active?: boolean
   exchange?: string
   pair?: string
+}
+
+export interface DepthSnapshot {
+  time: number
+  market?: string
+  mid: number
+  priceStep: number
+  bids: { [price: string]: number }
+  asks: { [price: string]: number }
+  rangePercent: number
+  markets?: string[]
 }
 
 export type MarketsBars = {
@@ -122,6 +135,7 @@ export interface Renderer {
   sources: { [name: string]: Bar }
   indicators: { [id: string]: RendererIndicatorData }
   series: { [id: string]: IndicatorSeriePoint }
+  depth?: DepthSnapshot | null
   empty?: boolean
   price?: number
 }

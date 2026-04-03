@@ -120,4 +120,5 @@ export interface Ticker {
   price: number
   volume?: number
   volumeDelta?: number
+  openInterest?: number | null
 }

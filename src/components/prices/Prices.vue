@@ -52,6 +52,9 @@
           <div v-if="showVolumeDelta" class="market__volume">
             {{ market.avgVolumeDelta }}%
           </div>
+          <div v-if="showOpenInterest" class="market__oi">
+            {{ formatOpenInterest(market.openInterest) }}
+          </div>
         </div>
       </component>
     </div>
@@ -84,6 +87,7 @@ type WatchlistMarket = Market & {
   avgVolume: number
   volumeDelta: number
   avgVolumeDelta: number
+  openInterest: number | null
   status: TickerStatus
 }
 
@@ -213,6 +217,10 @@ export default class Prices extends Mixins(PaneMixin) {
     return this.$store.state[this.paneId].showVolumeDelta
   }
 
+  get showOpenInterest() {
+    return this.$store.state[this.paneId].showOpenInterest
+  }
+
   get animateSort() {
     return this.$store.state[this.paneId].animateSort
   }
@@ -320,6 +328,10 @@ export default class Prices extends Mixins(PaneMixin) {
 
       market.volume += ticker.volume
       market.volumeDelta += ticker.volumeDelta
+      market.openInterest =
+        typeof ticker.openInterest === 'number'
+          ? ticker.openInterest
+          : market.openInterest
 
       if (avgPeriods) {
         market.avgVolume =
@@ -408,7 +420,8 @@ export default class Prices extends Mixins(PaneMixin) {
         volume: 0,
         avgVolume: 0,
         volumeDelta: 0,
-        avgVolumeDelta: 0
+        avgVolumeDelta: 0,
+        openInterest: null
       })
 
       return product
@@ -453,6 +466,14 @@ export default class Prices extends Mixins(PaneMixin) {
       } else {
         this.sortFunction = (a, b) => b.avgVolumeDelta - a.avgVolumeDelta
       }
+    } else if (by === 'oi') {
+      if (order === 1) {
+        this.sortFunction = (a, b) =>
+          (a.openInterest || 0) - (b.openInterest || 0)
+      } else {
+        this.sortFunction = (a, b) =>
+          (b.openInterest || 0) - (a.openInterest || 0)
+      }
     }
 
     this.filteredMarkets = this.filteredMarkets.sort(this.sortFunction)
@@ -460,6 +481,14 @@ export default class Prices extends Mixins(PaneMixin) {
 
   formatAmount(amount) {
     return formatAmount(amount, 0)
+  }
+
+  formatOpenInterest(amount) {
+    if (typeof amount !== 'number' || !isFinite(amount)) {
+      return '-'
+    }
+
+    return '$' + formatAmount(amount)
   }
 
   onResize(width: number, height: number) {

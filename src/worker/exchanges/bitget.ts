@@ -47,6 +47,69 @@ export default class BITGET extends Exchange {
     }
   }
 
+  supportsOpenInterest(pair) {
+    return !!this.types[pair] && this.types[pair] !== 'spot'
+  }
+
+  async fetchOpenInterests(pairs, tickers) {
+    const openInterests: { [pair: string]: number } = {}
+    const pairsByType = pairs.reduce(
+      (output, pair) => {
+        const type = this.types[pair]
+
+        if (!type || type === 'spot') {
+          return output
+        }
+
+        if (!output[type]) {
+          output[type] = []
+        }
+
+        output[type].push(pair)
+
+        return output
+      },
+      {} as { [type: string]: string[] }
+    )
+
+    await Promise.all(
+      Object.keys(pairsByType).map(async type => {
+        const response = await this.fetchJson<{
+          data?: { list?: Array<{ symbol: string; openInterest: string }> }
+        }>(
+          `https://api.bitget.com/api/v3/market/open-interest?category=${type.toUpperCase()}`
+        )
+        const list = (response.data && response.data.list) || []
+        const byPair = list.reduce(
+          (output, ticker) => {
+            output[this.formatRemoteToLocalPair(ticker.symbol, type)] = ticker
+            return output
+          },
+          {} as { [pair: string]: { symbol: string; openInterest: string } }
+        )
+
+        for (const pair of pairsByType[type]) {
+          const ticker = byPair[pair]
+          const price = tickers && tickers[pair] && tickers[pair].price
+
+          if (!ticker || !price) {
+            continue
+          }
+
+          const value = +ticker.openInterest
+
+          if (!isFinite(value)) {
+            continue
+          }
+
+          openInterests[pair] = value * price
+        }
+      })
+    )
+
+    return openInterests
+  }
+
   getLiquidationArgs() {
     return ['usdt-futures', 'coin-futures', 'usdc-futures'].map(instType => ({
       instType,

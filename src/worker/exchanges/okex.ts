@@ -4,7 +4,7 @@ export default class OKEX extends Exchange {
   id = 'OKEX'
   private specs: { [pair: string]: number }
   private inversed: { [pair: string]: boolean }
-  private types: { [pair: string]: 'SPOT' | 'SWAP' | 'FUTURE' }
+  private types: { [pair: string]: 'SPOT' | 'SWAP' | 'FUTURES' }
 
   protected endpoints = {
     PRODUCTS: [
@@ -71,6 +71,65 @@ export default class OKEX extends Exchange {
     }
   }
 
+  supportsOpenInterest(pair) {
+    return !!this.types[pair] && this.types[pair] !== 'SPOT'
+  }
+
+  async fetchOpenInterests(pairs) {
+    const openInterests: { [pair: string]: number } = {}
+    const pairsByType = pairs.reduce(
+      (output, pair) => {
+        const type = this.types[pair]
+
+        if (!type || type === 'SPOT') {
+          return output
+        }
+
+        if (!output[type]) {
+          output[type] = []
+        }
+
+        output[type].push(pair)
+
+        return output
+      },
+      {} as { [type: string]: string[] }
+    )
+
+    await Promise.all(
+      Object.keys(pairsByType).map(async type => {
+        const response = await this.fetchJson<{
+          data?: Array<{ instId: string; oiUsd: string }>
+        }>(`https://www.okx.com/api/v5/public/open-interest?instType=${type}`)
+        const byPair = ((response && response.data) || []).reduce(
+          (output, ticker) => {
+            output[ticker.instId] = ticker
+            return output
+          },
+          {} as { [pair: string]: { instId: string; oiUsd: string } }
+        )
+
+        for (const pair of pairsByType[type]) {
+          const ticker = byPair[pair]
+
+          if (!ticker || !ticker.oiUsd) {
+            continue
+          }
+
+          const value = +ticker.oiUsd
+
+          if (!isFinite(value)) {
+            continue
+          }
+
+          openInterests[pair] = value
+        }
+      })
+    )
+
+    return openInterests
+  }
+
   /**
    * Sub
    * @param {WebSocket} api
@@ -135,7 +194,7 @@ export default class OKEX extends Exchange {
     if (this.types[pair] !== 'SPOT') {
       api.send(
         JSON.stringify({
-          op: 'subscribe',
+          op: 'unsubscribe',
           args: [
             {
               channel: 'liquidation-orders',

@@ -2,6 +2,7 @@ import store from '@/store'
 
 import {
   Bar,
+  DepthSnapshot,
   IndicatorApi,
   IndicatorOption,
   IndicatorReference,
@@ -39,7 +40,11 @@ import dialogService from '@/services/dialogService'
 import { ChartPaneState, PriceScaleSettings } from '@/store/panesSettings/chart'
 import aggregatorService from '@/services/aggregatorService'
 import workspacesService from '@/services/workspacesService'
-import { stripStablePair, marketDecimals } from '@/services/productsService'
+import {
+  stripStablePair,
+  marketDecimals,
+  parseMarket
+} from '@/services/productsService'
 import audioService from '@/services/audioService'
 import alertService, {
   MarketAlert,
@@ -49,6 +54,7 @@ import alertService, {
 import historicalService, {
   HistoricalResponse
 } from '@/services/historicalService'
+import depthService from '@/services/depthService'
 
 import seriesUtils from '@/components/chart/serieUtils'
 
@@ -65,7 +71,7 @@ import {
   IChartApi,
   Time
 } from 'lightweight-charts'
-import { Trade } from '@/types/types'
+import { Trade, Ticker } from '@/types/types'
 import ChartControl from './controls'
 import grouping from './grouping'
 import {
@@ -124,6 +130,8 @@ export default class Chart {
   }
 
   private activeChunk: Chunk
+  private depthCacheRange: TimeRange = { from: null, to: null }
+  private depthSnapshots: { [market: string]: DepthSnapshot[] } = {}
   private queuedTrades: Trade[] = []
   private historicalMarkets: string[]
   private seriesIndicatorsMap: { [serieId: string]: IndicatorReference } = {}
@@ -948,6 +956,11 @@ export default class Chart {
     this.queuedTrades.splice(0, this.queuedTrades.length)
   }
 
+  clearDepthData() {
+    this.depthSnapshots = {}
+    this.depthCacheRange.from = this.depthCacheRange.to = null
+  }
+
   /**
    * Remove chart price lines (of given indicators if passed)
    * @param indicatorsIds
@@ -979,6 +992,7 @@ export default class Chart {
 
     this.chartCache.clear()
     this.clearData()
+    this.clearDepthData()
     this.clearChart()
     this.hasReachedEnd = false
     this.setTimeframe(store.state[this.paneId].timeframe)
@@ -1016,6 +1030,7 @@ export default class Chart {
 
     this.chartCache.clear()
     this.clearData()
+    this.clearDepthData()
     this.clearChart()
     this.removeChart()
     this.clearQueue()
@@ -1109,6 +1124,348 @@ export default class Chart {
     }
   }
 
+  updateTickers(tickers: { [market: string]: Ticker }) {
+    const markets = Object.keys(tickers).filter(
+      market =>
+        typeof this.marketsFilters[market] !== 'undefined' &&
+        typeof tickers[market].openInterest === 'number'
+    )
+
+    if (!markets.length) {
+      return
+    }
+
+    const timestamp = this.getRealtimeTickerTimestamp()
+
+    if (!this.activeRenderer || this.activeRenderer.timestamp < timestamp) {
+      this.advanceActiveRenderer(timestamp)
+    }
+
+    let hasActiveUpdate = false
+
+    for (let i = 0; i < markets.length; i++) {
+      const market = markets[i]
+      const ticker = tickers[market]
+      const source = this.ensureRendererSource(
+        this.activeRenderer,
+        market,
+        ticker.price
+      )
+      const nextOpenInterest = +ticker.openInterest
+
+      if (!isFinite(nextOpenInterest)) {
+        continue
+      }
+
+      const previousOpenInterest =
+        typeof source.oi === 'number' ? source.oi : null
+
+      source.active = this.marketsFilters[market]
+
+      if (previousOpenInterest === nextOpenInterest) {
+        continue
+      }
+
+      source.oi = nextOpenInterest
+      source.doi =
+        (source.doi || 0) +
+        (previousOpenInterest === null
+          ? 0
+          : nextOpenInterest - previousOpenInterest)
+      source.empty = false
+
+      if (source.active) {
+        hasActiveUpdate = true
+      }
+    }
+
+    if (!hasActiveUpdate) {
+      return
+    }
+
+    this.activeRenderer.bar.empty = false
+    this.syncRendererOpenInterest(this.activeRenderer)
+    this.syncRendererDepth(this.activeRenderer)
+    this.updateBar(this.activeRenderer)
+
+    if (this.renderedRange.to < this.activeRenderer.timestamp) {
+      this.renderedRange.to = this.activeRenderer.timestamp
+    }
+  }
+
+  getRealtimeTickerTimestamp() {
+    if (this.type === 'time') {
+      return floorTimestampToTimeframe(Date.now() / 1000, this.timeframe)
+    }
+
+    if (this.activeRenderer) {
+      return this.activeRenderer.timestamp
+    }
+
+    return Date.now() / 1000
+  }
+
+  ensureRendererSource(
+    renderer: Renderer,
+    market: string,
+    price?: number
+  ): Bar {
+    if (
+      !renderer.sources[market] ||
+      typeof renderer.sources[market].pair === 'undefined'
+    ) {
+      const [exchange, pair] = parseMarket(market)
+
+      registerInitialBar(
+        renderer,
+        market,
+        pair,
+        exchange,
+        typeof price === 'number' ? price : null,
+        this.marketsFilters[market],
+        this.isPrepending && this.prepend
+      )
+    }
+
+    renderer.sources[market].active = this.marketsFilters[market]
+
+    return renderer.sources[market]
+  }
+
+  syncRendererOpenInterest(renderer: Renderer) {
+    let openInterest = 0
+    let openInterestDelta = 0
+    let hasOpenInterest = false
+
+    for (const market in renderer.sources) {
+      const source = renderer.sources[market]
+
+      if (!source.active) {
+        continue
+      }
+
+      if (typeof source.oi === 'number' && isFinite(source.oi)) {
+        openInterest += source.oi
+        hasOpenInterest = true
+      }
+
+      if (typeof source.doi === 'number' && isFinite(source.doi)) {
+        openInterestDelta += source.doi
+      }
+    }
+
+    renderer.bar.oi = hasOpenInterest ? openInterest : null
+    renderer.bar.doi = openInterestDelta
+  }
+
+  usesDepthSnapshots() {
+    return this.loadedIndicators.some(
+      indicator =>
+        indicator.libraryId === 'orderbook-heatmap' ||
+        /bar\.depth|renderer\.depth/.test(indicator.script || '')
+    )
+  }
+
+  getDepthSnapshotForMarket(market: string, timestamp: number) {
+    const snapshots = this.depthSnapshots[market]
+
+    if (!snapshots || !snapshots.length) {
+      return null
+    }
+
+    let left = 0
+    let right = snapshots.length - 1
+    let latestSnapshot = null
+
+    while (left <= right) {
+      const middle = Math.floor((left + right) / 2)
+
+      if (snapshots[middle].time <= timestamp) {
+        latestSnapshot = snapshots[middle]
+        left = middle + 1
+      } else {
+        right = middle - 1
+      }
+    }
+
+    return latestSnapshot
+  }
+
+  getDepthPriceStepPrecision(step: number) {
+    if (!isFinite(step) || step <= 0) {
+      return 0
+    }
+
+    let precision = 0
+
+    while (
+      precision < 8 &&
+      Math.abs(
+        Math.round(step * Math.pow(10, precision)) -
+          step * Math.pow(10, precision)
+      ) > 1e-8
+    ) {
+      precision++
+    }
+
+    return precision
+  }
+
+  formatDepthPriceKey(price: number, step: number) {
+    const precision = this.getDepthPriceStepPrecision(step)
+    const factor = Math.pow(10, precision)
+    const normalizedPrice = Math.round(price * factor) / factor
+
+    return precision
+      ? normalizedPrice.toFixed(precision).replace(/\.?0+$/, '')
+      : Math.round(normalizedPrice).toString()
+  }
+
+  bucketDepthPrice(price: number, step: number, side: 'bid' | 'ask') {
+    const precision = this.getDepthPriceStepPrecision(step)
+    const factor = Math.pow(10, precision)
+    const scaledStep = Math.round(step * factor)
+    const scaledPrice = Math.round(price * factor)
+
+    if (!scaledStep) {
+      return null
+    }
+
+    const bucketPrice =
+      side === 'bid'
+        ? Math.floor((scaledPrice + 1e-6) / scaledStep) * scaledStep
+        : Math.ceil((scaledPrice - 1e-6) / scaledStep) * scaledStep
+
+    return bucketPrice / factor
+  }
+
+  mergeDepthLevels(
+    target: { [price: string]: number },
+    levels: { [price: string]: number },
+    priceStep: number,
+    side: 'bid' | 'ask'
+  ) {
+    for (const [priceText, value] of Object.entries(levels || {})) {
+      const price = +priceText
+      const amount = +value
+
+      if (!isFinite(price) || price <= 0 || !isFinite(amount) || amount <= 0) {
+        continue
+      }
+
+      const bucketPrice = this.bucketDepthPrice(price, priceStep, side)
+
+      if (!bucketPrice || bucketPrice <= 0) {
+        continue
+      }
+
+      const bucketKey = this.formatDepthPriceKey(bucketPrice, priceStep)
+      target[bucketKey] = (target[bucketKey] || 0) + amount
+    }
+  }
+
+  syncRendererDepth(renderer: Renderer) {
+    if (!this.usesDepthSnapshots()) {
+      renderer.depth = null
+      return
+    }
+
+    const snapshots: DepthSnapshot[] = []
+
+    for (const market in renderer.sources) {
+      if (!renderer.sources[market].active) {
+        continue
+      }
+
+      const snapshot = this.getDepthSnapshotForMarket(market, renderer.timestamp)
+
+      if (snapshot) {
+        snapshots.push(snapshot)
+      }
+    }
+
+    if (!snapshots.length) {
+      renderer.depth = null
+      return
+    }
+
+    const bids: { [price: string]: number } = {}
+    const asks: { [price: string]: number } = {}
+    let mid = 0
+    let priceStep = 0
+    let rangePercent = 0
+
+    for (const snapshot of snapshots) {
+      priceStep = Math.max(priceStep, snapshot.priceStep || 0)
+      rangePercent = Math.max(rangePercent, snapshot.rangePercent || 0)
+    }
+
+    if (!priceStep) {
+      renderer.depth = null
+      return
+    }
+
+    for (const snapshot of snapshots) {
+      mid += snapshot.mid
+      this.mergeDepthLevels(bids, snapshot.bids, priceStep, 'bid')
+      this.mergeDepthLevels(asks, snapshot.asks, priceStep, 'ask')
+    }
+
+    renderer.depth = {
+      time: renderer.timestamp,
+      mid: mid / snapshots.length,
+      priceStep,
+      bids,
+      asks,
+      rangePercent,
+      markets: snapshots
+        .map(snapshot => snapshot.market)
+        .filter(market => typeof market === 'string')
+    }
+  }
+
+  advanceActiveRenderer(timestamp: number) {
+    if (!this.activeRenderer) {
+      this.activeRenderer = this.createRenderer(timestamp)
+      return
+    }
+
+    if (
+      !this.activeChunk ||
+      (this.activeChunk.to < this.activeRenderer.timestamp &&
+        this.activeChunk.bars.length >= MAX_BARS_PER_CHUNKS)
+    ) {
+      this.getActiveChunk()
+    }
+
+    this.syncRendererOpenInterest(this.activeRenderer)
+    this.syncRendererDepth(this.activeRenderer)
+
+    if (!this.activeRenderer.bar.empty) {
+      this.updateBar(this.activeRenderer)
+    }
+
+    for (const source in this.activeRenderer.sources) {
+      if (this.activeRenderer.sources[source].empty === false) {
+        this.activeChunk.bars.push(
+          cloneSourceBar(
+            this.activeRenderer.sources[source],
+            this.activeRenderer.timestamp
+          )
+        )
+      }
+    }
+
+    this.activeChunk.to = this.chartCache.cacheRange.to =
+      this.activeRenderer.timestamp
+
+    if (this.renderedRange.to < this.activeRenderer.timestamp) {
+      this.renderedRange.to = this.activeRenderer.timestamp
+    }
+
+    this.nextBar(timestamp, this.activeRenderer)
+  }
+
   /**
    * take a set of trades, group them into bars while using activeRenderer for reference and render them
    * also cache finished bar
@@ -1143,43 +1500,7 @@ export default class Chart {
       }
 
       if (!this.activeRenderer || this.activeRenderer.timestamp < timestamp) {
-        if (this.activeRenderer) {
-          if (
-            !this.activeChunk ||
-            (this.activeChunk.to < this.activeRenderer.timestamp &&
-              this.activeChunk.bars.length >= MAX_BARS_PER_CHUNKS)
-          ) {
-            // ensure active chunk is created and ready to receive bars
-            this.getActiveChunk()
-          }
-
-          if (!this.activeRenderer.bar.empty) {
-            this.updateBar(this.activeRenderer)
-          }
-
-          // feed activeChunk with active bar exchange snapshot
-          for (const source in this.activeRenderer.sources) {
-            if (this.activeRenderer.sources[source].empty === false) {
-              this.activeChunk.bars.push(
-                cloneSourceBar(
-                  this.activeRenderer.sources[source],
-                  this.activeRenderer.timestamp
-                )
-              )
-            }
-          }
-
-          this.activeChunk.to = this.chartCache.cacheRange.to =
-            this.activeRenderer.timestamp
-
-          if (this.renderedRange.to < this.activeRenderer.timestamp) {
-            this.renderedRange.to = this.activeRenderer.timestamp
-          }
-
-          this.nextBar(timestamp, this.activeRenderer)
-        } else {
-          this.activeRenderer = this.createRenderer(timestamp)
-        }
+        this.advanceActiveRenderer(timestamp)
       }
 
       if (trade.timestamp) {
@@ -1255,6 +1576,8 @@ export default class Chart {
       return
     }
 
+    this.syncRendererOpenInterest(this.activeRenderer)
+    this.syncRendererDepth(this.activeRenderer)
     this.updateBar(this.activeRenderer)
 
     if (this.renderedRange.to < this.activeRenderer.timestamp) {
@@ -1361,6 +1684,8 @@ export default class Chart {
 
           to = temporaryRenderer.timestamp
 
+          this.syncRendererOpenInterest(temporaryRenderer)
+          this.syncRendererDepth(temporaryRenderer)
           const computedBar = this.computeBar(temporaryRenderer, indicatorsIds)
 
           for (const id in computedBar) {
@@ -1976,6 +2301,7 @@ export default class Chart {
       indicators: {},
       sources: {},
       series: {},
+      depth: null,
       bar: {
         vbuy: 0,
         vsell: 0,
@@ -1983,6 +2309,8 @@ export default class Chart {
         csell: 0,
         lbuy: 0,
         lsell: 0,
+        oi: null,
+        doi: 0,
         empty: true
       }
     }
@@ -2014,6 +2342,9 @@ export default class Chart {
 
       this.bindIndicator(indicator, renderer)
     }
+
+    this.syncRendererOpenInterest(renderer)
+    this.syncRendererDepth(renderer)
 
     return renderer
   }
@@ -2408,6 +2739,67 @@ export default class Chart {
     this.initialize()
   }
 
+  mergeDepthSnapshots(snapshots: DepthSnapshot[]) {
+    for (const snapshot of snapshots) {
+      if (!snapshot.market) {
+        continue
+      }
+
+      if (!this.depthSnapshots[snapshot.market]) {
+        this.depthSnapshots[snapshot.market] = []
+      }
+
+      const existingSnapshots = this.depthSnapshots[snapshot.market]
+      const existingIndex = existingSnapshots.findIndex(
+        existingSnapshot => existingSnapshot.time === snapshot.time
+      )
+
+      if (existingIndex !== -1) {
+        existingSnapshots.splice(existingIndex, 1, snapshot)
+      } else {
+        existingSnapshots.push(snapshot)
+      }
+
+      existingSnapshots.sort((a, b) => a.time - b.time)
+    }
+  }
+
+  onDepthSnapshots(snapshots: DepthSnapshot[], range: TimeRange) {
+    this.mergeDepthSnapshots(snapshots)
+
+    if (
+      this.depthCacheRange.from === null ||
+      range.from < this.depthCacheRange.from
+    ) {
+      this.depthCacheRange.from = range.from
+    }
+
+    if (this.depthCacheRange.to === null || range.to > this.depthCacheRange.to) {
+      this.depthCacheRange.to = range.to
+    }
+  }
+
+  fetchDepth(range: TimeRange) {
+    if (!this.usesDepthSnapshots()) {
+      return Promise.resolve()
+    }
+
+    const markets = Object.keys(this.marketsFilters)
+
+    if (!markets.length) {
+      return Promise.resolve()
+    }
+
+    return depthService
+      .fetch(range.from * 1000, range.to * 1000, markets)
+      .then(snapshots => {
+        this.onDepthSnapshots(snapshots, range)
+      })
+      .catch(error => {
+        console.error(error)
+      })
+  }
+
   /**
    * fetch whatever is missing based on visiblerange
    * @param {TimeRange} range range to fetch
@@ -2495,14 +2887,18 @@ export default class Chart {
 
     this.isLoading = true
 
-    return historicalService
-      .fetch(
-        rangeToFetch.from * 1000,
-        rangeToFetch.to * 1000,
-        timeframe,
-        this.historicalMarkets
-      )
-      .then(results => this.onHistorical(results))
+    return Promise.all([
+      historicalService
+        .fetch(
+          rangeToFetch.from * 1000,
+          rangeToFetch.to * 1000,
+          timeframe,
+          this.historicalMarkets
+        )
+        .then(results => this.onHistorical(results, false)),
+      this.fetchDepth(rangeToFetch)
+    ])
+      .then(() => this.renderAll(true))
       .catch(err => {
         console.error(err)
 
@@ -2526,7 +2922,7 @@ export default class Chart {
    * Split bars into chunks and add to chartCache
    * Render chart once everything is done
    */
-  onHistorical(response: HistoricalResponse) {
+  onHistorical(response: HistoricalResponse, shouldRender = true) {
     const chunk: Chunk = {
       from: response.from,
       to: response.to,
@@ -2539,7 +2935,9 @@ export default class Chart {
       registerPrependFromHistorical(this.prepend, response)
     }
 
-    this.renderAll(true)
+    if (shouldRender) {
+      this.renderAll(true)
+    }
   }
 
   async fetchMore(visibleLogicalRange) {

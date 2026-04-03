@@ -107,8 +107,13 @@ export async function getPrependFromTickers(
 
   for (const market in tickers) {
     const price = tickers[market].price
+    const openInterest = tickers[market].openInterest
+    const normalizedPrice = typeof price === 'number' ? price : null
 
-    if (!price || typeof filters[market] === 'undefined') {
+    if (
+      (normalizedPrice === null && typeof openInterest !== 'number') ||
+      typeof filters[market] === 'undefined'
+    ) {
       continue
     }
 
@@ -116,10 +121,12 @@ export async function getPrependFromTickers(
 
     prepend.bars[market] = {
       time: prepend.time,
-      close: price,
-      high: price,
-      low: price,
-      open: price,
+      close: normalizedPrice,
+      high: normalizedPrice,
+      low: normalizedPrice,
+      open: normalizedPrice,
+      oi: typeof openInterest === 'number' ? openInterest : null,
+      doi: 0,
       exchange: exchange,
       pair: pair
     }

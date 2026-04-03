@@ -33,6 +33,53 @@ export default class HYPERLIQUID extends Exchange {
     }
   }
 
+  supportsOpenInterest() {
+    return true
+  }
+
+  async fetchOpenInterests(pairs) {
+    const openInterests: { [pair: string]: number } = {}
+    const response = await this.fetchJson<any>({
+      url: 'https://api.hyperliquid.xyz/info',
+      method: 'POST',
+      data: JSON.stringify({ type: 'metaAndAssetCtxs' }),
+      proxy: false
+    })
+    const universe = response && response[0] && response[0].universe
+    const contexts = response && response[1]
+
+    if (!universe || !contexts) {
+      return openInterests
+    }
+
+    const contextsByPair = universe.reduce(
+      (output, product, index) => {
+        output[product.name] = contexts[index]
+        return output
+      },
+      {} as { [pair: string]: any }
+    )
+
+    for (const pair of pairs) {
+      const context = contextsByPair[pair]
+
+      if (!context) {
+        continue
+      }
+
+      const openInterest = +context.openInterest
+      const price = +context.markPx || +context.oraclePx
+
+      if (!isFinite(openInterest) || !price) {
+        continue
+      }
+
+      openInterests[pair] = openInterest * price
+    }
+
+    return openInterests
+  }
+
   /**
    * Sub
    * @param {WebSocket} api

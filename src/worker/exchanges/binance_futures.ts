@@ -62,6 +62,38 @@ export default class BINANCE_FUTURES extends Exchange {
     }
   }
 
+  supportsOpenInterest() {
+    return true
+  }
+
+  async fetchOpenInterest(pair, ticker) {
+    const isDapi = !!this.dapi[pair]
+    const endpoint = isDapi
+      ? `https://dapi.binance.com/dapi/v1/openInterest?symbol=${pair.toUpperCase()}`
+      : `https://fapi.binance.com/fapi/v1/openInterest?symbol=${pair.toUpperCase()}`
+
+    const response = await this.fetchJson<{ openInterest: string }>(endpoint)
+    const openInterest = +response.openInterest
+
+    if (!isFinite(openInterest)) {
+      return null
+    }
+
+    if (isDapi) {
+      if (!this.specs[pair]) {
+        return null
+      }
+
+      return openInterest * this.specs[pair]
+    }
+
+    if (!ticker || !ticker.price) {
+      return null
+    }
+
+    return openInterest * ticker.price
+  }
+
   /**
    * Sub
    * @param {WebSocket} api

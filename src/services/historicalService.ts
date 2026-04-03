@@ -164,6 +164,10 @@ class HistoricalService extends EventEmitter {
             typeof columns['lsell'] !== 'undefined'
               ? data[i][columns['lsell']]
               : 0,
+          oi:
+            typeof columns['oi'] !== 'undefined'
+              ? data[i][columns['oi']]
+              : null,
           market:
             typeof columns['market'] !== 'undefined'
               ? data[i][columns['market']]
@@ -222,15 +226,28 @@ class HistoricalService extends EventEmitter {
           lastClosedBars[data[i].market].csell += data[i].csell
           lastClosedBars[data[i].market].lbuy += data[i].lbuy
           lastClosedBars[data[i].market].lsell += data[i].lsell
-          lastClosedBars[data[i].market].high = Math.max(
-            data[i].high,
-            lastClosedBars[data[i].market].high
-          )
-          lastClosedBars[data[i].market].low = Math.min(
-            data[i].low,
-            lastClosedBars[data[i].market].low
-          )
-          lastClosedBars[data[i].market].close = data[i].close
+
+          if (data[i].high !== null && typeof data[i].high !== 'undefined') {
+            lastClosedBars[data[i].market].high =
+              lastClosedBars[data[i].market].high === null
+                ? data[i].high
+                : Math.max(data[i].high, lastClosedBars[data[i].market].high)
+          }
+
+          if (data[i].low !== null && typeof data[i].low !== 'undefined') {
+            lastClosedBars[data[i].market].low =
+              lastClosedBars[data[i].market].low === null
+                ? data[i].low
+                : Math.min(data[i].low, lastClosedBars[data[i].market].low)
+          }
+
+          if (data[i].close !== null && typeof data[i].close !== 'undefined') {
+            lastClosedBars[data[i].market].close = data[i].close
+          }
+
+          if (typeof data[i].oi === 'number') {
+            lastClosedBars[data[i].market].oi = data[i].oi
+          }
 
           data.splice(i, 1)
           i--

@@ -37,7 +37,16 @@ export enum ALLOWED_OPTION_TYPES {
 
 const VARIABLES_VAR_NAME = 'vars'
 const FUNCTIONS_VAR_NAME = 'fns'
-export const DATA_PROPS = ['vbuy', 'vsell', 'cbuy', 'csell', 'lbuy', 'lsell']
+export const DATA_PROPS = [
+  'vbuy',
+  'vsell',
+  'cbuy',
+  'csell',
+  'lbuy',
+  'lsell',
+  'oi',
+  'doi'
+]
 export const SERIE_TYPES = {
   candlestick: 'ohlc',
   bar: 'ohlc',
@@ -97,7 +106,7 @@ function normalizeCommonVariables(input, indicatorId) {
   input = input.replace(/([^.])?\b(indicatorId)\b/gi, `$1'${indicatorId}'`)
   input = input.replace(/([^.])?\b(bar)\b/gi, '$1renderer')
   input = input.replace(
-    /([^.]|^)\b(vbuy|vsell|cbuy|csell|lbuy|lsell)\b/gi,
+    /([^.]|^)\b(vbuy|vsell|cbuy|csell|lbuy|lsell|oi|doi)\b/gi,
     '$1renderer.bar.$2'
   )
   input = input.replace(
@@ -765,7 +774,7 @@ function parseSources(output, sources) {
 
 function parseMarkets(output: string, markets: IndicatorMarkets): string {
   const EXCHANGE_REGEX =
-    /\b([A-Z_]{3,}:[a-zA-Z0-9/_-]{1,})(:[\w]{3,})?\.?([a-z]{3,})?\b/g
+    /\b([A-Z_]{3,}:[a-zA-Z0-9/_-]{1,})(:[\w]{3,})?\.?((?:oi|[a-z]{3,}))?\b/g
 
   let marketMatch = null
   let iterations = 0

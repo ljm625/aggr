@@ -14,6 +14,8 @@ export function resetRendererBar(renderer: Renderer) {
     csell: 0,
     lbuy: 0,
     lsell: 0,
+    oi: typeof renderer.bar.oi === 'number' ? renderer.bar.oi : null,
+    doi: 0,
     empty: true
   }
 
@@ -29,10 +31,14 @@ export function resetRendererBar(renderer: Renderer) {
  * @param {Bar} bar
  */
 export function resetBar(bar: Bar) {
-  if (bar.close !== null) {
+  if (bar.close !== null && typeof bar.close !== 'undefined') {
     bar.open = bar.close
     bar.high = bar.close
     bar.low = bar.close
+  } else {
+    bar.open = null
+    bar.high = null
+    bar.low = null
   }
 
   bar.vbuy = 0
@@ -41,6 +47,8 @@ export function resetBar(bar: Bar) {
   bar.csell = 0
   bar.lbuy = 0
   bar.lsell = 0
+  bar.oi = typeof bar.oi === 'number' ? bar.oi : null
+  bar.doi = 0
   bar.empty = true
 
   return bar
@@ -66,7 +74,9 @@ export function cloneSourceBar(sourceBar: Bar, timestamp?: number): Bar {
     cbuy: sourceBar.cbuy,
     csell: sourceBar.csell,
     lbuy: sourceBar.lbuy,
-    lsell: sourceBar.lsell
+    lsell: sourceBar.lsell,
+    oi: sourceBar.oi,
+    doi: sourceBar.doi
   }
 }
 
@@ -115,6 +125,8 @@ export function mergeBarsWithActiveBars(bars: Bar[], renderer: Renderer) {
           cachedBar.csell += activeBar.csell
           cachedBar.lbuy += activeBar.lbuy
           cachedBar.lsell += activeBar.lsell
+          cachedBar.oi = activeBar.oi
+          cachedBar.doi = activeBar.doi
           cachedBar.open = activeBar.open
           cachedBar.high = activeBar.high
           cachedBar.low = activeBar.low
@@ -141,8 +153,13 @@ export function registerInitialBar(
   renderer.sources[market] = {
     pair: pair,
     exchange: exchange,
+    open: close,
+    high: close,
+    low: close,
     close: close,
-    active
+    active,
+    oi: null,
+    doi: 0
   }
 
   resetBar(renderer.sources[market])

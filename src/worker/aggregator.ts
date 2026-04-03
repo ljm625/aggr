@@ -19,7 +19,9 @@ class Aggregator {
   connectionChange = 0
 
   private tickersDelay = 10
+  private openInterestDelay = 30000
   private baseAggregationTimeout = 50
+  private isFetchingOpenInterest = false
   private onGoingAggregations: { [identifier: string]: AggregatedTrade } = {}
   private aggregationTimeouts: { [identifier: string]: number } = {}
   private pendingTrades: Trade[] = []
@@ -30,9 +32,10 @@ class Aggregator {
   private _connectionChangeNoticeTimeout: number
 
   constructor(worker: Worker) {
+    this.ctx = worker
     this.bindExchanges()
     this.startTickersInterval()
-    this.ctx = worker
+    this.startOpenInterestInterval()
     this.ctx.postMessage({
       op: 'hello'
     })
@@ -436,7 +439,8 @@ class Aggregator {
         updatedTickers[marketKey] = {
           price: this.tickers[marketKey].price,
           volume: this.tickers[marketKey].volume,
-          volumeDelta: this.tickers[marketKey].volumeDelta
+          volumeDelta: this.tickers[marketKey].volumeDelta,
+          openInterest: this.tickers[marketKey].openInterest
         }
 
         this.tickers[marketKey].updated = false
@@ -471,7 +475,8 @@ class Aggregator {
       volume: 0,
       volumeDelta: 0,
       initialPrice: null,
-      price: null
+      price: null,
+      openInterest: null
     }
 
     this.connectionsCount = Object.keys(this.connections).length
@@ -758,6 +763,14 @@ class Aggregator {
     this.emitTickers()
   }
 
+  startOpenInterestInterval() {
+    if (this['_openInterestInterval']) {
+      return
+    }
+
+    this.emitOpenInterests()
+  }
+
   startAggrInterval() {
     if (this['_aggrInterval']) {
       this.clearInterval('aggr')
@@ -869,6 +882,83 @@ class Aggregator {
 
     this.tickersDelay = Math.log(Math.exp(count / 20 + 1) * 200) * 100
     return this.tickersDelay
+  }
+
+  async emitOpenInterests() {
+    if (this.connectionsCount && !this.isFetchingOpenInterest) {
+      this.isFetchingOpenInterest = true
+
+      try {
+        const pairsByExchange = Object.values(this.connections).reduce(
+          (output, connection) => {
+            const exchange = getExchangeById(connection.exchange)
+
+            if (!exchange || !exchange.supportsOpenInterest(connection.pair)) {
+              return output
+            }
+
+            if (!output[connection.exchange]) {
+              output[connection.exchange] = []
+            }
+
+            output[connection.exchange].push(connection.pair)
+
+            return output
+          },
+          {} as { [exchangeId: string]: string[] }
+        )
+
+        await Promise.all(
+          Object.keys(pairsByExchange).map(async exchangeId => {
+            const exchange = getExchangeById(exchangeId)
+
+            if (!exchange) {
+              return
+            }
+
+            const pairs = pairsByExchange[exchangeId]
+            const tickers = pairs.reduce(
+              (output, pair) => {
+                output[pair] = this.tickers[exchangeId + ':' + pair]
+                return output
+              },
+              {} as { [pair: string]: Ticker }
+            )
+
+            const openInterests = await exchange.fetchOpenInterests(
+              pairs,
+              tickers
+            )
+
+            for (const pair in openInterests) {
+              const marketKey = exchangeId + ':' + pair
+
+              if (
+                !this.tickers[marketKey] ||
+                this.tickers[marketKey].openInterest === openInterests[pair]
+              ) {
+                continue
+              }
+
+              this.tickers[marketKey].openInterest = openInterests[pair]
+              this.tickers[marketKey].updated = true
+            }
+          })
+        )
+      } catch (error) {
+        console.debug(
+          '[worker] failed to refresh open interest',
+          error instanceof Error ? error.message : error
+        )
+      } finally {
+        this.isFetchingOpenInterest = false
+      }
+    }
+
+    this['_openInterestInterval'] = self.setTimeout(
+      () => this.emitOpenInterests(),
+      this.openInterestDelay
+    )
   }
 
   getAllTickers(payload, trackingId) {

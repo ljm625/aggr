@@ -59,6 +59,78 @@ export default class BYBIT extends Exchange {
       types
     }
   }
+
+  supportsOpenInterest(pair) {
+    return !!this.types[pair] && this.types[pair] !== 'spot'
+  }
+
+  async fetchOpenInterests(pairs) {
+    const openInterests: { [pair: string]: number } = {}
+    const pairsByType = pairs.reduce(
+      (output, pair) => {
+        const type = this.types[pair]
+
+        if (!type || type === 'spot') {
+          return output
+        }
+
+        if (!output[type]) {
+          output[type] = []
+        }
+
+        output[type].push(pair)
+
+        return output
+      },
+      {} as { [type: string]: string[] }
+    )
+
+    await Promise.all(
+      Object.keys(pairsByType).map(async type => {
+        const response = await this.fetchJson<{
+          result?: { list?: any[] }
+        }>(`https://api.bybit.com/v5/market/tickers?category=${type}`)
+        const tickers = (response.result && response.result.list) || []
+        const byPair = tickers.reduce(
+          (output, ticker) => {
+            output[ticker.symbol] = ticker
+            return output
+          },
+          {} as { [pair: string]: any }
+        )
+
+        for (const pair of pairsByType[type]) {
+          const ticker = byPair[pair]
+
+          if (!ticker) {
+            continue
+          }
+
+          const value = +ticker.openInterest
+
+          if (!isFinite(value)) {
+            continue
+          }
+
+          if (type === 'inverse') {
+            openInterests[pair] = value
+            continue
+          }
+
+          const markPrice = +ticker.markPrice || +ticker.lastPrice
+
+          if (!markPrice) {
+            continue
+          }
+
+          openInterests[pair] = value * markPrice
+        }
+      })
+    )
+
+    return openInterests
+  }
+
   /**
    * Sub
    * @param {WebSocket} api
@@ -169,7 +241,10 @@ export default class BYBIT extends Exchange {
           json.data.map(trade => this.formatTrade(trade, isSpot))
         )
       } else {
-        return this.emitLiquidations(api.id, json.data.map(liquidation => this.formatLiquidation(liquidation)))
+        return this.emitLiquidations(
+          api.id,
+          json.data.map(liquidation => this.formatLiquidation(liquidation))
+        )
       }
     }
   }

@@ -45,6 +45,43 @@ export default class DERIBIT extends Exchange {
     return true
   }
 
+  supportsOpenInterest() {
+    return true
+  }
+
+  async fetchOpenInterest(pair) {
+    const response = await this.fetchJson<{
+      result?: Array<{ open_interest: string; mark_price?: string }>
+    }>(
+      `https://www.deribit.com/api/v2/public/get_book_summary_by_instrument?instrument_name=${encodeURIComponent(
+        pair
+      )}`
+    )
+    const summary = response.result && response.result[0]
+
+    if (!summary) {
+      return null
+    }
+
+    const openInterest = +summary.open_interest
+
+    if (!isFinite(openInterest)) {
+      return null
+    }
+
+    if (this.types[pair] === 'reversed') {
+      return openInterest
+    }
+
+    const markPrice = +summary.mark_price
+
+    if (!markPrice) {
+      return null
+    }
+
+    return openInterest * markPrice
+  }
+
   /**
    * Sub
    * @param {WebSocket} api

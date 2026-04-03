@@ -60,6 +60,19 @@
           <input
             type="checkbox"
             class="form-control"
+            :checked="showOpenInterest"
+            @change="$store.commit(paneId + '/TOGGLE_OPEN_INTEREST')"
+          />
+          <div></div>
+          <span>Show OI (USD)</span>
+        </label>
+      </div>
+
+      <div class="form-group mb8">
+        <label class="checkbox-control -small">
+          <input
+            type="checkbox"
+            class="form-control"
             :checked="showPrice"
             @change="$store.commit(paneId + '/TOGGLE_PRICE')"
           />
@@ -240,6 +253,10 @@ export default class PricesSettings extends Vue {
 
   get period() {
     return this.$store.state[this.paneId].period
+  }
+
+  get showOpenInterest() {
+    return this.$store.state[this.paneId].showOpenInterest
   }
 
   get showChange() {

@@ -1,4 +1,4 @@
-import { ProductsData, ProductsStorage } from '@/types/types'
+import { ProductsData, ProductsStorage, Ticker } from '@/types/types'
 import { EventEmitter } from 'eventemitter3'
 import { dispatchAsync } from './helpers/com'
 import { randomString, sleep } from './helpers/utils'
@@ -82,6 +82,44 @@ class Exchange extends EventEmitter {
 
   constructor() {
     super()
+  }
+
+  protected async fetchJson<T = any>(endpoint: ExchangeEndpoint): Promise<T> {
+    const request =
+      typeof endpoint === 'string'
+        ? {
+            url: endpoint,
+            method: 'GET'
+          }
+        : endpoint
+
+    let url = request.url
+
+    if (
+      request.proxy !== false &&
+      import.meta.env.VITE_APP_PROXY_URL &&
+      !/^https:\/\/raw.githubusercontent.com\//.test(url)
+    ) {
+      url = import.meta.env.VITE_APP_PROXY_URL + url
+    }
+
+    const headers: Record<string, string> = {}
+
+    if (request.method === 'POST' && request.data) {
+      headers['Content-Type'] = 'application/json'
+    }
+
+    const response = await fetch(url, {
+      method: request.method,
+      headers,
+      body: request.data
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    return response.json()
   }
 
   get requiresProducts() {
@@ -612,6 +650,50 @@ class Exchange extends EventEmitter {
     // should be overrided by exchange class
 
     return true
+  }
+
+  supportsOpenInterest(_pair: string) {
+    return false
+  }
+
+  async fetchOpenInterest(
+    _pair: string,
+    _ticker?: Ticker
+  ): Promise<number | null> {
+    return null
+  }
+
+  async fetchOpenInterests(
+    pairs: string[],
+    tickers?: { [pair: string]: Ticker }
+  ) {
+    const openInterests: { [pair: string]: number } = {}
+
+    await Promise.all(
+      pairs.map(async pair => {
+        if (!this.supportsOpenInterest(pair)) {
+          return
+        }
+
+        try {
+          const openInterest = await this.fetchOpenInterest(
+            pair,
+            tickers && tickers[pair]
+          )
+
+          if (typeof openInterest === 'number' && isFinite(openInterest)) {
+            openInterests[pair] = openInterest
+          }
+        } catch (error) {
+          console.debug(
+            `[${this.id}] failed to fetch open interest for ${pair}`,
+            error instanceof Error ? error.message : error
+          )
+        }
+      })
+    )
+
+    return openInterests
   }
 
   /**

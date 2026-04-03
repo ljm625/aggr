@@ -7,11 +7,12 @@ export interface PricesPaneState {
   showPairs?: boolean
   showVolume?: boolean
   showVolumeDelta?: boolean
+  showOpenInterest?: boolean
   period?: number
   showPrice?: boolean
   showChange?: boolean
   sortOrder?: 1 | -1
-  sortType?: 'price' | 'change' | 'volume' | null
+  sortType?: 'price' | 'change' | 'volume' | 'delta' | 'oi' | null
   shortSymbols?: boolean
   avgPeriods?: boolean
   volumeThreshold?: number
@@ -26,6 +27,7 @@ const state = {
   showPairs: true,
   showVolume: true,
   showVolumeDelta: true,
+  showOpenInterest: false,
   period: 0,
   showChange: true,
   showPrice: true,
@@ -56,6 +58,9 @@ const mutations = {
   },
   TOGGLE_VOLUME_DELTA(state) {
     state.showVolumeDelta = !state.showVolumeDelta
+  },
+  TOGGLE_OPEN_INTEREST(state) {
+    state.showOpenInterest = !state.showOpenInterest
   },
   SET_PERIOD(state, value) {
     state.period = value

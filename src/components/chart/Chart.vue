@@ -78,7 +78,7 @@ import MarketsOverlay from '@/components/chart/MarketsOverlay.vue'
 import AlertsList from '@/components/alerts/AlertsList.vue'
 import Btn from '@/components/framework/Btn.vue'
 
-import { Trade } from '@/types/types'
+import { Trade, Ticker } from '@/types/types'
 
 @Component({
   name: 'Chart',
@@ -172,17 +172,23 @@ export default class ChartComponent extends Mixins(PaneMixin) {
     this.chart.queueTrades(trades)
   }
 
+  onTickers(tickers: { [market: string]: Ticker }) {
+    this.chart.updateTickers(tickers)
+  }
+
   onAlert(alertEvent: AlertEvent) {
     this.chart.onAlert(alertEvent)
   }
 
   bindAggregator() {
     aggregatorService.on('trades', this.onTrades)
+    aggregatorService.on('tickers', this.onTickers)
     aggregatorService.on('alert', this.onAlert)
   }
 
   unbindAggregator() {
     aggregatorService.off('trades', this.onTrades)
+    aggregatorService.off('tickers', this.onTickers)
     aggregatorService.off('alert', this.onAlert)
   }
 
