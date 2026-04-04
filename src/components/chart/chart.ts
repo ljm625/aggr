@@ -1317,6 +1317,21 @@ export default class Chart {
     )
   }
 
+  clearRealtimeOrderBookHeatmapSeries(
+    indicator: LoadedIndicator,
+    renderer: Renderer
+  ) {
+    if (indicator.libraryId !== 'orderbook-heatmap') {
+      return
+    }
+
+    for (let i = 0; i < indicator.apis.length; i++) {
+      renderer.series[indicator.apis[i].id] = {
+        time: renderer.localTimestamp
+      }
+    }
+  }
+
   getDepthSnapshotReferenceTime(renderer: Renderer) {
     if (renderer !== this.activeRenderer || this.type !== 'time') {
       return renderer.timestamp
@@ -2485,6 +2500,8 @@ export default class Chart {
 
       const indicator = this.loadedIndicators[i]
       const serieData = renderer.indicators[indicator.id]
+
+      this.clearRealtimeOrderBookHeatmapSeries(indicator, renderer)
 
       this.loadedIndicators[i].adapter(
         renderer,
