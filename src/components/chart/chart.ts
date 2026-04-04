@@ -138,6 +138,8 @@ export default class Chart {
   private historicalMarkets: string[]
   private seriesIndicatorsMap: { [serieId: string]: IndicatorReference } = {}
   private previousLogicalRange: string
+  private _depthRefreshPromise: Promise<void> | null = null
+  private _lastDepthRefreshAt = 0
   private axis: { top: number; left: number; right: number; time: number } = {
     top: 0,
     left: 0,
@@ -1193,6 +1195,8 @@ export default class Chart {
     if (this.renderedRange.to < this.activeRenderer.timestamp) {
       this.renderedRange.to = this.activeRenderer.timestamp
     }
+
+    this.maybeRefreshDepthCoverage(this.activeRenderer.timestamp)
   }
 
   getRealtimeTickerTimestamp() {
@@ -1266,6 +1270,88 @@ export default class Chart {
         indicator.libraryId === 'orderbook-heatmap' ||
         /bar\.depth|renderer\.depth/.test(indicator.script || '')
     )
+  }
+
+  getDepthSnapshotReferenceTime(renderer: Renderer) {
+    if (renderer !== this.activeRenderer || this.type !== 'time') {
+      return renderer.timestamp
+    }
+
+    return Math.max(
+      renderer.timestamp,
+      renderer.lastTradeTimestamp || 0,
+      Math.round(Date.now() / 1000)
+    )
+  }
+
+  maybeRefreshDepthCoverage(timestamp?: number) {
+    if (!this.usesDepthSnapshots()) {
+      return
+    }
+
+    const markets = Object.keys(this.marketsFilters)
+
+    if (!markets.length) {
+      return
+    }
+
+    const referenceTimestamp = Math.max(
+      Math.round(timestamp || 0),
+      this.activeRenderer
+        ? this.getDepthSnapshotReferenceTime(this.activeRenderer)
+        : 0
+    )
+
+    if (!referenceTimestamp) {
+      return
+    }
+
+    const refreshThreshold = 60
+
+    if (
+      this.depthCacheRange.to !== null &&
+      referenceTimestamp <= this.depthCacheRange.to - refreshThreshold
+    ) {
+      return
+    }
+
+    if (
+      this._depthRefreshPromise ||
+      Date.now() - this._lastDepthRefreshAt < 15000
+    ) {
+      return
+    }
+
+    const refreshLookback = Math.max((this.timeframe || 60) * 6, 60 * 10)
+    const refreshLead = 60
+    const from = Math.max(
+      0,
+      this.depthCacheRange.to !== null
+        ? Math.max(
+            referenceTimestamp - refreshLookback,
+            this.depthCacheRange.to - refreshThreshold
+          )
+        : referenceTimestamp - refreshLookback
+    )
+    const range = {
+      from,
+      to: referenceTimestamp + refreshLead
+    }
+
+    if (range.to <= range.from) {
+      return
+    }
+
+    this._lastDepthRefreshAt = Date.now()
+    this._depthRefreshPromise = this.fetchDepth(range)
+      .then(() => {
+        if (!this.isLoading && this.chartInstance) {
+          this.renderAll()
+        }
+      })
+      .finally(() => {
+        this._depthRefreshPromise = null
+      })
   }
 
   getDepthSnapshotForMarket(market: string, timestamp: number) {
@@ -1436,13 +1522,17 @@ export default class Chart {
     }
 
     const snapshots: DepthSnapshot[] = []
+    const snapshotTimestamp = this.getDepthSnapshotReferenceTime(renderer)
 
     for (const market in renderer.sources) {
       if (!renderer.sources[market].active) {
         continue
       }
 
-      const snapshot = this.getDepthSnapshotForMarket(market, renderer.timestamp)
+      const snapshot = this.getDepthSnapshotForMarket(
+        market,
+        snapshotTimestamp
+      )
 
       if (snapshot) {
         snapshots.push(snapshot)
@@ -1698,6 +1788,8 @@ export default class Chart {
     if (this.renderedRange.to < this.activeRenderer.timestamp) {
       this.renderedRange.to = this.activeRenderer.timestamp
     }
+
+    this.maybeRefreshDepthCoverage(this.activeRenderer.timestamp)
   }
 
   /**
