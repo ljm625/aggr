@@ -140,6 +140,7 @@ export default class Chart {
   private previousLogicalRange: string
   private _depthRefreshPromise: Promise<void> | null = null
   private _lastDepthRefreshAt = 0
+  private _skipNextRealtimeGapFill = false
   private axis: { top: number; left: number; right: number; time: number } = {
     top: 0,
     left: 0,
@@ -1107,12 +1108,17 @@ export default class Chart {
       return
     }
 
+    const queuedTrades = this.queuedTrades.splice(0, this.queuedTrades.length)
+    let shouldRequeue = false
+
     try {
-      this.renderRealtimeTrades(this.queuedTrades)
+      shouldRequeue = this.renderRealtimeTrades(queuedTrades) === false
     } catch (error) {
       console.log(error)
     } finally {
-      this.queuedTrades.splice(0, this.queuedTrades.length)
+      if (shouldRequeue) {
+        Array.prototype.unshift.apply(this.queuedTrades, queuedTrades)
+      }
     }
   }
 
@@ -1763,7 +1769,17 @@ export default class Chart {
    */
   renderRealtimeTrades(trades) {
     if (!trades.length) {
-      return
+      return true
+    }
+
+    if (
+      this.type === 'time' &&
+      this.isLoading &&
+      !this.activeRenderer &&
+      this.historicalMarkets &&
+      this.historicalMarkets.length
+    ) {
+      return false
     }
 
     let redrawAll = false
@@ -1863,7 +1879,7 @@ export default class Chart {
       if (redrawAll) {
         this.renderAll()
       }
-      return
+      return true
     }
 
     this.syncRendererOpenInterest(this.activeRenderer)
@@ -1875,6 +1891,8 @@ export default class Chart {
     }
 
     this.maybeRefreshDepthCoverage(this.activeRenderer.timestamp)
+
+    return true
   }
 
   /**
@@ -2649,6 +2667,7 @@ export default class Chart {
   nextBar(timestamp, renderer?: Renderer) {
     if (
       this.fillGapsWithEmpty &&
+      !this._skipNextRealtimeGapFill &&
       renderer === this.activeRenderer &&
       this.activeRenderer.type === 'time' &&
       this.activeRenderer.timestamp < timestamp - this.activeRenderer.timeframe
@@ -2677,6 +2696,7 @@ export default class Chart {
 
     renderer.timestamp = timestamp
     renderer.localTimestamp = timestamp + this.timezoneOffset
+    this._skipNextRealtimeGapFill = false
   }
 
   /**
@@ -3102,6 +3122,7 @@ export default class Chart {
     }
     const alreadyHasData =
       this.chartCache.cacheRange && this.chartCache.cacheRange.from
+    const isInitialFetch = !range && !alreadyHasData
 
     if (!this.historicalMarkets.length) {
       return
@@ -3197,6 +3218,10 @@ export default class Chart {
         this.hasReachedEnd = true
       })
       .then(() => {
+        if (isInitialFetch && this.type === 'time') {
+          this._skipNextRealtimeGapFill = true
+        }
+
         store.dispatch('app/hideNotice', 'fetching-' + this.paneId)
 
         setTimeout(() => {
