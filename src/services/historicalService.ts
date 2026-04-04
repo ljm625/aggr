@@ -119,14 +119,6 @@ class HistoricalService extends EventEmitter {
     // base timestamp of results
     let firstBarTimestamp: number
 
-    if (Array.isArray(data[0])) {
-      firstBarTimestamp = data[0][0]
-    } else {
-      firstBarTimestamp = +new Date(data[0].time) / 1000
-    }
-
-    markets = [...markets]
-
     const isOdd = isOddTimeframe(timeframe)
     const preferQuoteCurrencySize = store.state.settings.preferQuoteCurrencySize
     const currentOpenTimestamp = floorTimestampToTimeframe(
@@ -135,8 +127,22 @@ class HistoricalService extends EventEmitter {
       isOdd
     )
 
+    if (Array.isArray(data[0])) {
+      firstBarTimestamp = floorTimestampToTimeframe(data[0][0], timeframe, isOdd)
+    } else {
+      firstBarTimestamp = floorTimestampToTimeframe(
+        +new Date(data[0].time) / 1000,
+        timeframe,
+        isOdd
+      )
+    }
+
+    markets = [...markets]
+
     for (let i = 0; i < data.length; i++) {
-      if (!data[i].time && data[i][0]) {
+      const isArrayPoint = Array.isArray(data[i])
+
+      if (isArrayPoint) {
         // new format is array, transform into objet
         data[i] = {
           time:
@@ -190,83 +196,70 @@ class HistoricalService extends EventEmitter {
               ? data[i][columns['vsell']]
               : 0
         }
-      } else {
-        // pending bar was sent
-        if (!lastClosedBars[data[i].market]) {
-          // get latest bar for that market
-          for (let j = i - 1; j >= 0; j--) {
-            if (data[j].market === data[i].market) {
-              lastClosedBars[data[i].market] = data[j]
-              break
-            }
-          }
+      }
+
+      data[i].time = floorTimestampToTimeframe(
+        isArrayPoint ? data[i].time : data[i].time / 1000,
+        timeframe,
+        isOdd
+      )
+
+      // Drop the still-forming current bucket on initial/history loads.
+      // Realtime trades will rebuild the live bar without creating phantom
+      // future candles that depend on the page-open second.
+      if (data[i].time >= currentOpenTimestamp) {
+        data.splice(i, 1)
+        i--
+        continue
+      }
+
+      const referenceBar = lastClosedBars[data[i].market]
+
+      if (!referenceBar || referenceBar.time < data[i].time) {
+        // Keep the latest bar we saw for this market so lower-timeframe
+        // pending points can collapse back into the requested bucket.
+        lastClosedBars[data[i].market] = data[i]
+      } else if (
+        referenceBar !== data[i] &&
+        referenceBar.time === data[i].time
+      ) {
+        referenceBar.vbuy += data[i].vbuy
+        referenceBar.vsell += data[i].vsell
+        referenceBar.cbuy += data[i].cbuy
+        referenceBar.csell += data[i].csell
+        referenceBar.lbuy += data[i].lbuy
+        referenceBar.lsell += data[i].lsell
+
+        if (data[i].open !== null && typeof data[i].open !== 'undefined') {
+          referenceBar.open =
+            referenceBar.open === null ? data[i].open : referenceBar.open
         }
 
-        // format pending bar time floored to timeframe
-        data[i].time = floorTimestampToTimeframe(
-          data[i].time / 1000,
-          timeframe,
-          isOdd
-        )
-
-        // Drop the still-forming current bucket on initial/history loads.
-        // Realtime trades will rebuild the live bar without creating phantom
-        // future candles that depend on the page-open second.
-        if (data[i].time >= currentOpenTimestamp) {
-          data.splice(i, 1)
-          i--
-          continue
+        if (data[i].high !== null && typeof data[i].high !== 'undefined') {
+          referenceBar.high =
+            referenceBar.high === null
+              ? data[i].high
+              : Math.max(data[i].high, referenceBar.high)
         }
 
-        if (
-          !preferQuoteCurrencySize &&
-          (data[i].vbuy || data[i].vsell) &&
-          data[i].close
-        ) {
-          data[i].vbuy = data[i].vbuy / data[i].close
-          data[i].vsell = data[i].vsell / data[i].close
+        if (data[i].low !== null && typeof data[i].low !== 'undefined') {
+          referenceBar.low =
+            referenceBar.low === null
+              ? data[i].low
+              : Math.min(data[i].low, referenceBar.low)
         }
 
-        if (
-          !lastClosedBars[data[i].market] ||
-          lastClosedBars[data[i].market].time < data[i].time
-        ) {
-          // store reference bar for this market (either because it didn't exist or because reference bar time is < than pending bar time)
-          lastClosedBars[data[i].market] = data[i]
-        } else if (lastClosedBars[data[i].market] !== data[i]) {
-          lastClosedBars[data[i].market].vbuy += data[i].vbuy
-          lastClosedBars[data[i].market].vsell += data[i].vsell
-          lastClosedBars[data[i].market].cbuy += data[i].cbuy
-          lastClosedBars[data[i].market].csell += data[i].csell
-          lastClosedBars[data[i].market].lbuy += data[i].lbuy
-          lastClosedBars[data[i].market].lsell += data[i].lsell
-
-          if (data[i].high !== null && typeof data[i].high !== 'undefined') {
-            lastClosedBars[data[i].market].high =
-              lastClosedBars[data[i].market].high === null
-                ? data[i].high
-                : Math.max(data[i].high, lastClosedBars[data[i].market].high)
-          }
-
-          if (data[i].low !== null && typeof data[i].low !== 'undefined') {
-            lastClosedBars[data[i].market].low =
-              lastClosedBars[data[i].market].low === null
-                ? data[i].low
-                : Math.min(data[i].low, lastClosedBars[data[i].market].low)
-          }
-
-          if (data[i].close !== null && typeof data[i].close !== 'undefined') {
-            lastClosedBars[data[i].market].close = data[i].close
-          }
-
-          if (typeof data[i].oi === 'number') {
-            lastClosedBars[data[i].market].oi = data[i].oi
-          }
-
-          data.splice(i, 1)
-          i--
-          continue
+        if (data[i].close !== null && typeof data[i].close !== 'undefined') {
+          referenceBar.close = data[i].close
         }
+
+        if (typeof data[i].oi === 'number') {
+          referenceBar.oi = data[i].oi
+        }
+
+        data.splice(i, 1)
+        i--
+        continue
       }
 
       if (!initialPrices[data[i].market]) {
