@@ -1142,6 +1142,10 @@ export default class Chart {
     const timestamp = this.getRealtimeTickerTimestamp()
 
     if (!this.activeRenderer) {
+      if (this.type === 'time') {
+        return
+      }
+
       this.activeRenderer = this.createRenderer(timestamp)
     } else if (
       this.type !== 'time' &&
