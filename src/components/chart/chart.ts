@@ -2,6 +2,7 @@ import store from '@/store'
 
 import {
   Bar,
+  DepthAggregate,
   DepthSnapshot,
   IndicatorApi,
   IndicatorOption,
@@ -43,7 +44,8 @@ import workspacesService from '@/services/workspacesService'
 import {
   stripStablePair,
   marketDecimals,
-  parseMarket
+  parseMarket,
+  getMarketProduct
 } from '@/services/productsService'
 import audioService from '@/services/audioService'
 import alertService, {
@@ -1364,6 +1366,69 @@ export default class Chart {
     }
   }
 
+  getDepthMarketGroup(market: string): 'spot' | 'perp' | null {
+    if (!market) {
+      return null
+    }
+
+    const [exchange, pair] = parseMarket(market)
+    const product = getMarketProduct(exchange, pair)
+
+    if (!product) {
+      return null
+    }
+
+    return product.type === 'spot' ? 'spot' : 'perp'
+  }
+
+  sumDepthLevels(levels: { [price: string]: number }) {
+    let total = 0
+
+    for (const value of Object.values(levels || {})) {
+      const amount = +value
+
+      if (!isFinite(amount) || amount <= 0) {
+        continue
+      }
+
+      total += amount
+    }
+
+    return total
+  }
+
+  finalizeDepthAggregate(
+    aggregate: DepthAggregate,
+    snapshotsCount: number
+  ): DepthAggregate | null {
+    if (!aggregate.markets.length || !snapshotsCount) {
+      return null
+    }
+
+    aggregate.mid = aggregate.mid / snapshotsCount
+    aggregate.totalBids = this.sumDepthLevels(aggregate.bids)
+    aggregate.totalAsks = this.sumDepthLevels(aggregate.asks)
+    aggregate.dominantValue = Math.abs(
+      aggregate.totalBids - aggregate.totalAsks
+    )
+
+    if (aggregate.totalBids > aggregate.totalAsks) {
+      aggregate.dominantSide = 'bid'
+    } else if (aggregate.totalAsks > aggregate.totalBids) {
+      aggregate.dominantSide = 'ask'
+    } else {
+      aggregate.dominantSide = null
+    }
+
+    const totalDepth = aggregate.totalBids + aggregate.totalAsks
+
+    aggregate.imbalance = totalDepth
+      ? (aggregate.totalBids - aggregate.totalAsks) / totalDepth
+      : 0
+
+    return aggregate
+  }
+
   syncRendererDepth(renderer: Renderer) {
     if (!this.usesDepthSnapshots()) {
       renderer.depth = null
@@ -1405,11 +1470,52 @@ export default class Chart {
       return
     }
 
+    const spotDepth: DepthAggregate = {
+      mid: 0,
+      priceStep,
+      bids: {},
+      asks: {},
+      rangePercent,
+      markets: []
+    }
+    const perpDepth: DepthAggregate = {
+      mid: 0,
+      priceStep,
+      bids: {},
+      asks: {},
+      rangePercent,
+      markets: []
+    }
+    let spotSnapshotsCount = 0
+    let perpSnapshotsCount = 0
+
     for (const snapshot of snapshots) {
       mid += snapshot.mid
       this.mergeDepthLevels(bids, snapshot.bids, priceStep, 'bid')
       this.mergeDepthLevels(asks, snapshot.asks, priceStep, 'ask')
+
+      const marketGroup = this.getDepthMarketGroup(snapshot.market)
+
+      if (marketGroup === 'spot') {
+        spotDepth.mid += snapshot.mid
+        spotDepth.markets.push(snapshot.market)
+        this.mergeDepthLevels(spotDepth.bids, snapshot.bids, priceStep, 'bid')
+        this.mergeDepthLevels(spotDepth.asks, snapshot.asks, priceStep, 'ask')
+        spotSnapshotsCount++
+      } else if (marketGroup === 'perp') {
+        perpDepth.mid += snapshot.mid
+        perpDepth.markets.push(snapshot.market)
+        this.mergeDepthLevels(perpDepth.bids, snapshot.bids, priceStep, 'bid')
+        this.mergeDepthLevels(perpDepth.asks, snapshot.asks, priceStep, 'ask')
+        perpSnapshotsCount++
+      }
     }
+
+    const spot = this.finalizeDepthAggregate(spotDepth, spotSnapshotsCount)
+    const perp = this.finalizeDepthAggregate(perpDepth, perpSnapshotsCount)
+    const totalBids = this.sumDepthLevels(bids)
+    const totalAsks = this.sumDepthLevels(asks)
+    const totalDepth = totalBids + totalAsks
 
     renderer.depth = {
       time: renderer.timestamp,
@@ -1418,9 +1524,18 @@ export default class Chart {
       bids,
       asks,
       rangePercent,
+      totalBids,
+      totalAsks,
+      dominantValue: Math.abs(totalBids - totalAsks),
+      dominantSide:
+        totalBids > totalAsks ? 'bid' : totalAsks > totalBids ? 'ask' : null,
+      imbalance: totalDepth ? (totalBids - totalAsks) / totalDepth : 0,
       markets: snapshots
         .map(snapshot => snapshot.market)
-        .filter(market => typeof market === 'string')
+        .filter(market => typeof market === 'string'),
+      spot,
+      perp,
+      future: perp
     }
   }
 

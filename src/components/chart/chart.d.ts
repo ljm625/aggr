@@ -20,15 +20,26 @@ export interface Bar {
   pair?: string
 }
 
-export interface DepthSnapshot {
-  time: number
-  market?: string
+export interface DepthAggregate {
   mid: number
   priceStep: number
   bids: { [price: string]: number }
   asks: { [price: string]: number }
   rangePercent: number
   markets?: string[]
+  totalBids?: number
+  totalAsks?: number
+  imbalance?: number
+  dominantSide?: 'bid' | 'ask' | null
+  dominantValue?: number
+}
+
+export interface DepthSnapshot extends DepthAggregate {
+  time: number
+  market?: string
+  spot?: DepthAggregate | null
+  perp?: DepthAggregate | null
+  future?: DepthAggregate | null
 }
 
 export type MarketsBars = {
