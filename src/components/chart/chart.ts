@@ -184,6 +184,29 @@ export default class Chart {
     this.fillGapsWithEmpty = Boolean(store.state[this.paneId].fillGapsWithEmpty)
   }
 
+  shouldDebugTimeBars() {
+    if (this.type !== 'time') {
+      return false
+    }
+
+    try {
+      return (
+        /(?:^|[?&])debugTimeBars=1(?:&|$)/.test(window.location.search) ||
+        localStorage.getItem('debugTimeBars') === '1'
+      )
+    } catch (error) {
+      return false
+    }
+  }
+
+  logTimeBars(event: string, payload = {}) {
+    if (!this.shouldDebugTimeBars()) {
+      return
+    }
+
+    console.info(`[chart/${this.paneId}/time-bars] ${event}`, payload)
+  }
+
   /**
    * update watermark when pane's markets changes
    */
@@ -1207,6 +1230,15 @@ export default class Chart {
     this.syncRendererDepth(this.activeRenderer)
     this.updateBar(this.activeRenderer)
 
+    this.logTimeBars('ticker-update', {
+      bucketTimestamp: timestamp,
+      activeRendererTimestamp: this.activeRenderer.timestamp,
+      lastTradeTimestamp: this.activeRenderer.lastTradeTimestamp || null,
+      changedMarkets: markets,
+      renderedRangeTo: this.renderedRange.to,
+      depthCacheTo: this.depthCacheRange.to
+    })
+
     if (this.renderedRange.to < this.activeRenderer.timestamp) {
       this.renderedRange.to = this.activeRenderer.timestamp
     }
@@ -1357,9 +1389,39 @@ export default class Chart {
       return
     }
 
+    this.logTimeBars('depth-refresh-request', {
+      requestedTimestamp: Math.round(timestamp || 0) || null,
+      referenceTimestamp,
+      activeRendererTimestamp: this.activeRenderer
+        ? this.activeRenderer.timestamp
+        : null,
+      lastTradeTimestamp:
+        this.activeRenderer && this.activeRenderer.lastTradeTimestamp
+          ? this.activeRenderer.lastTradeTimestamp
+          : null,
+      depthCacheRange: {
+        ...this.depthCacheRange
+      },
+      range
+    })
+
     this._lastDepthRefreshAt = Date.now()
     this._depthRefreshPromise = this.fetchDepth(range)
       .then(() => {
+        this.logTimeBars('depth-refresh-complete', {
+          activeRendererTimestamp: this.activeRenderer
+            ? this.activeRenderer.timestamp
+            : null,
+          lastTradeTimestamp:
+            this.activeRenderer && this.activeRenderer.lastTradeTimestamp
+              ? this.activeRenderer.lastTradeTimestamp
+              : null,
+          depthCacheRange: {
+            ...this.depthCacheRange
+          },
+          willRenderAll: !this.isLoading && !!this.chartInstance
+        })
+
         if (!this.isLoading && this.chartInstance) {
           this.renderAll()
         }
@@ -1721,6 +1783,23 @@ export default class Chart {
   }
 
   advanceActiveRenderer(timestamp: number) {
+    const previousTimestamp = this.activeRenderer
+      ? this.activeRenderer.timestamp
+      : null
+
+    this.logTimeBars('advance-active-renderer', {
+      from: previousTimestamp,
+      to: timestamp,
+      lastTradeTimestamp:
+        this.activeRenderer && this.activeRenderer.lastTradeTimestamp
+          ? this.activeRenderer.lastTradeTimestamp
+          : null,
+      activeBarEmpty:
+        this.activeRenderer && this.activeRenderer.bar
+          ? this.activeRenderer.bar.empty
+          : null
+    })
+
     if (!this.activeRenderer) {
       this.activeRenderer = this.createRenderer(timestamp)
       return
@@ -1806,6 +1885,14 @@ export default class Chart {
       }
 
       if (!this.activeRenderer || this.activeRenderer.timestamp < timestamp) {
+        this.logTimeBars('trade-advance-request', {
+          market: identifier,
+          tradeTimestamp: trade.timestamp ? trade.timestamp / 1000 : null,
+          groupedTimestamp: timestamp,
+          activeRendererTimestamp: this.activeRenderer
+            ? this.activeRenderer.timestamp
+            : null
+        })
         this.advanceActiveRenderer(timestamp)
       }
 
@@ -1906,7 +1993,31 @@ export default class Chart {
    * @param {boolean} silent
    */
   renderBars(bars: Bar[], indicatorId, silent?: boolean) {
+    const previousLastBarTime = bars.length ? bars[bars.length - 1].time : null
+    const previousLength = bars.length
+
     mergeBarsWithActiveBars(bars, this.activeRenderer)
+
+    if (
+      this.activeRenderer &&
+      previousLastBarTime !== null &&
+      bars.length &&
+      bars[bars.length - 1].time === this.activeRenderer.timestamp &&
+      this.activeRenderer.timestamp > previousLastBarTime
+    ) {
+      this.logTimeBars('renderBars-merged-active-bar', {
+        indicatorId: indicatorId || null,
+        previousLastBarTime,
+        mergedLastBarTime: bars[bars.length - 1].time,
+        previousLength,
+        mergedLength: bars.length,
+        activeRendererTimestamp: this.activeRenderer.timestamp,
+        activeBarEmpty: this.activeRenderer.bar.empty,
+        activeSources: Object.values(this.activeRenderer.sources).filter(
+          bar => bar.empty === false
+        ).length
+      })
+    }
 
     if (!bars.length) {
       return
@@ -2031,6 +2142,13 @@ export default class Chart {
               temporaryRenderer.timeframe
 
             if (missingBars > 0) {
+              this.logTimeBars('computeBars-gap-fill', {
+                fromTimestamp: temporaryRenderer.timestamp,
+                targetTimestamp: bar.time,
+                missingBars,
+                indicatorId: indicatorId || null
+              })
+
               for (let j = 0; j < missingBars; j++) {
                 this.incrementRendererBar(temporaryRenderer)
 
@@ -2207,6 +2325,29 @@ export default class Chart {
     }
 
     const scrollPosition = this.chartInstance.timeScale().scrollPosition()
+    const cachedBarsLength = this.chartCache.chunks.length
+      ? this.chartCache.chunks.reduce((count, chunk) => count + chunk.bars.length, 0)
+      : 0
+
+    this.logTimeBars('renderAll', {
+      triggerPan: !!triggerPan,
+      chunks: this.chartCache.chunks.length,
+      cachedBarsLength,
+      cacheRange: {
+        ...this.chartCache.cacheRange
+      },
+      renderedRange: {
+        ...this.renderedRange
+      },
+      activeRendererTimestamp: this.activeRenderer
+        ? this.activeRenderer.timestamp
+        : null,
+      lastTradeTimestamp:
+        this.activeRenderer && this.activeRenderer.lastTradeTimestamp
+          ? this.activeRenderer.lastTradeTimestamp
+          : null
+    })
+
     this.clearChart(triggerPan)
     this.renderBars(
       this.chartCache.chunks.length
@@ -2596,6 +2737,8 @@ export default class Chart {
     firstBarTimestamp: number,
     indicatorsIds?: string[]
   ): Renderer {
+    const requestedTimestamp = firstBarTimestamp
+
     firstBarTimestamp = floorTimestampToTimeframe(
       firstBarTimestamp,
       this.timeframe
@@ -2656,6 +2799,12 @@ export default class Chart {
     this.syncRendererOpenInterest(renderer)
     this.syncRendererDepth(renderer)
 
+    this.logTimeBars('create-renderer', {
+      requestedTimestamp,
+      rendererTimestamp: renderer.timestamp,
+      indicatorsIds: indicatorsIds || null
+    })
+
     return renderer
   }
 
@@ -2677,6 +2826,12 @@ export default class Chart {
           this.activeRenderer.timeframe -
           this.activeRenderer.timestamp) /
         this.activeRenderer.timeframe
+
+      this.logTimeBars('nextBar-gap-fill', {
+        fromTimestamp: this.activeRenderer.timestamp,
+        targetTimestamp: timestamp,
+        missingBars
+      })
 
       for (let k = 0; k < missingBars; k++) {
         this.incrementRendererBar(renderer)
