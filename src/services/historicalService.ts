@@ -129,6 +129,11 @@ class HistoricalService extends EventEmitter {
 
     const isOdd = isOddTimeframe(timeframe)
     const preferQuoteCurrencySize = store.state.settings.preferQuoteCurrencySize
+    const currentOpenTimestamp = floorTimestampToTimeframe(
+      Date.now() / 1000,
+      timeframe,
+      isOdd
+    )
 
     for (let i = 0; i < data.length; i++) {
       if (!data[i].time && data[i][0]) {
@@ -204,6 +209,15 @@ class HistoricalService extends EventEmitter {
           isOdd
         )
 
+        // Drop the still-forming current bucket on initial/history loads.
+        // Realtime trades will rebuild the live bar without creating phantom
+        // future candles that depend on the page-open second.
+        if (data[i].time >= currentOpenTimestamp) {
+          data.splice(i, 1)
+          i--
+          continue
+        }
+
         if (
           !preferQuoteCurrencySize &&
           (data[i].vbuy || data[i].vsell) &&
@@ -277,6 +291,10 @@ class HistoricalService extends EventEmitter {
       const [exchange, pair] = parseMarket(data[i].market)
       data[i].exchange = exchange
       data[i].pair = pair
+    }
+
+    if (!data.length) {
+      throw new Error('No more data')
     }
 
     return {
