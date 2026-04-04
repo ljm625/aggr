@@ -1141,7 +1141,12 @@ export default class Chart {
 
     const timestamp = this.getRealtimeTickerTimestamp()
 
-    if (!this.activeRenderer || this.activeRenderer.timestamp < timestamp) {
+    if (!this.activeRenderer) {
+      this.activeRenderer = this.createRenderer(timestamp)
+    } else if (
+      this.type !== 'time' &&
+      this.activeRenderer.timestamp < timestamp
+    ) {
       this.advanceActiveRenderer(timestamp)
     }
 
@@ -1431,10 +1436,11 @@ export default class Chart {
     target: { [price: string]: number },
     levels: { [price: string]: number },
     priceStep: number,
-    side: 'bid' | 'ask'
+    side: 'bid' | 'ask',
+    priceOffset = 0
   ) {
     for (const [priceText, value] of Object.entries(levels || {})) {
-      const price = +priceText
+      const price = +priceText + priceOffset
       const amount = +value
 
       if (!isFinite(price) || price <= 0 || !isFinite(amount) || amount <= 0) {
@@ -1515,6 +1521,49 @@ export default class Chart {
     return aggregate
   }
 
+  getDepthReferencePrice(renderer: Renderer, snapshots: DepthSnapshot[]) {
+    const candidates = [
+      renderer.series &&
+      renderer.series.price &&
+      typeof renderer.series.price.close === 'number'
+        ? renderer.series.price.close
+        : null,
+      renderer.series &&
+      renderer.series.price &&
+      typeof renderer.series.price.value === 'number'
+        ? renderer.series.price.value
+        : null,
+      typeof renderer.bar.close === 'number' ? renderer.bar.close : null,
+      typeof renderer.price === 'number' ? renderer.price : null
+    ]
+
+    if (renderer === this.activeRenderer) {
+      candidates.unshift(this.getPrice())
+    }
+
+    for (const candidate of candidates) {
+      const price = +candidate
+
+      if (isFinite(price) && price > 0) {
+        return price
+      }
+    }
+
+    let mid = 0
+    let count = 0
+
+    for (const snapshot of snapshots) {
+      if (!isFinite(snapshot.mid) || snapshot.mid <= 0) {
+        continue
+      }
+
+      mid += snapshot.mid
+      count++
+    }
+
+    return count ? mid / count : null
+  }
+
   syncRendererDepth(renderer: Renderer) {
     if (!this.usesDepthSnapshots()) {
       renderer.depth = null
@@ -1560,6 +1609,8 @@ export default class Chart {
       return
     }
 
+    const referencePrice = this.getDepthReferencePrice(renderer, snapshots)
+
     const spotDepth: DepthAggregate = {
       mid: 0,
       priceStep,
@@ -1580,23 +1631,53 @@ export default class Chart {
     let perpSnapshotsCount = 0
 
     for (const snapshot of snapshots) {
-      mid += snapshot.mid
-      this.mergeDepthLevels(bids, snapshot.bids, priceStep, 'bid')
-      this.mergeDepthLevels(asks, snapshot.asks, priceStep, 'ask')
+      const priceOffset =
+        referencePrice && isFinite(snapshot.mid)
+          ? referencePrice - snapshot.mid
+          : 0
+      const alignedMid = snapshot.mid + priceOffset
+
+      mid += alignedMid
+      this.mergeDepthLevels(bids, snapshot.bids, priceStep, 'bid', priceOffset)
+      this.mergeDepthLevels(asks, snapshot.asks, priceStep, 'ask', priceOffset)
 
       const marketGroup = this.getDepthMarketGroup(snapshot.market)
 
       if (marketGroup === 'spot') {
-        spotDepth.mid += snapshot.mid
+        spotDepth.mid += alignedMid
         spotDepth.markets.push(snapshot.market)
-        this.mergeDepthLevels(spotDepth.bids, snapshot.bids, priceStep, 'bid')
-        this.mergeDepthLevels(spotDepth.asks, snapshot.asks, priceStep, 'ask')
+        this.mergeDepthLevels(
+          spotDepth.bids,
+          snapshot.bids,
+          priceStep,
+          'bid',
+          priceOffset
+        )
+        this.mergeDepthLevels(
+          spotDepth.asks,
+          snapshot.asks,
+          priceStep,
+          'ask',
+          priceOffset
+        )
         spotSnapshotsCount++
       } else if (marketGroup === 'perp') {
-        perpDepth.mid += snapshot.mid
+        perpDepth.mid += alignedMid
         perpDepth.markets.push(snapshot.market)
-        this.mergeDepthLevels(perpDepth.bids, snapshot.bids, priceStep, 'bid')
-        this.mergeDepthLevels(perpDepth.asks, snapshot.asks, priceStep, 'ask')
+        this.mergeDepthLevels(
+          perpDepth.bids,
+          snapshot.bids,
+          priceStep,
+          'bid',
+          priceOffset
+        )
+        this.mergeDepthLevels(
+          perpDepth.asks,
+          snapshot.asks,
+          priceStep,
+          'ask',
+          priceOffset
+        )
         perpSnapshotsCount++
       }
     }
