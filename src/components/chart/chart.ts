@@ -134,6 +134,7 @@ export default class Chart {
   private activeChunk: Chunk
   private depthCacheRange: TimeRange = { from: null, to: null }
   private depthSnapshots: { [market: string]: DepthSnapshot[] } = {}
+  private _depthDataVersion = 0
   private queuedTrades: Trade[] = []
   private historicalMarkets: string[]
   private seriesIndicatorsMap: { [serieId: string]: IndicatorReference } = {}
@@ -962,6 +963,7 @@ export default class Chart {
   }
 
   clearDepthData() {
+    this._depthDataVersion++
     this.depthSnapshots = {}
     this.depthCacheRange.from = this.depthCacheRange.to = null
   }
@@ -3103,27 +3105,23 @@ export default class Chart {
   }
 
   mergeDepthSnapshots(snapshots: DepthSnapshot[]) {
+    const incoming: { [market: string]: DepthSnapshot[] } = {}
     for (const snapshot of snapshots) {
-      if (!snapshot.market) {
-        continue
+      if (!snapshot.market) continue
+      if (!incoming[snapshot.market]) incoming[snapshot.market] = []
+      incoming[snapshot.market].push(snapshot)
+    }
+    for (const market of Object.keys(incoming)) {
+      const merged = new Map<number, DepthSnapshot>()
+      for (const snapshot of this.depthSnapshots[market] || []) {
+        merged.set(snapshot.time, snapshot)
       }
-
-      if (!this.depthSnapshots[snapshot.market]) {
-        this.depthSnapshots[snapshot.market] = []
+      for (const snapshot of incoming[market]) {
+        merged.set(snapshot.time, snapshot)
       }
-
-      const existingSnapshots = this.depthSnapshots[snapshot.market]
-      const existingIndex = existingSnapshots.findIndex(
-        existingSnapshot => existingSnapshot.time === snapshot.time
+      this.depthSnapshots[market] = Array.from(merged.values()).sort(
+        (a, b) => a.time - b.time
       )
-
-      if (existingIndex !== -1) {
-        existingSnapshots.splice(existingIndex, 1, snapshot)
-      } else {
-        existingSnapshots.push(snapshot)
-      }
-
-      existingSnapshots.sort((a, b) => a.time - b.time)
     }
   }
 
@@ -3153,11 +3151,21 @@ export default class Chart {
       return Promise.resolve()
     }
 
+    const version = this._depthDataVersion
     return depthService
-      .fetch(range.from * 1000, range.to * 1000, markets)
-      .then(snapshots => {
-        this.onDepthSnapshots(snapshots, range)
-      })
+      .fetchBatches(
+        range.from * 1000,
+        range.to * 1000,
+        markets,
+        (snapshots, batch) => {
+          if (version !== this._depthDataVersion) return
+          this.onDepthSnapshots(snapshots, {
+            from: batch.from / 1000,
+            to: batch.to / 1000
+          })
+        },
+        () => version !== this._depthDataVersion
+      )
       .catch(error => {
         console.error(error)
       })
