@@ -3,6 +3,13 @@ import { getApiUrl, handleFetchError } from '@/utils/helpers'
 import depthCache, { DepthResponseCache } from './depthCache'
 
 export const DEPTH_DAY_MS = 86400000
+export const DEPTH_INTERVAL_MS = 5 * 60 * 1000
+export const DEPTH_HISTORY_MS = 30 * DEPTH_DAY_MS
+export function getDepthHistoryStart(now = Date.now()) {
+  return (
+    Math.ceil((now - DEPTH_HISTORY_MS) / DEPTH_INTERVAL_MS) * DEPTH_INTERVAL_MS
+  )
+}
 const CLOSED_DAY_DELAY_MS = 5 * 60 * 1000
 
 export interface DepthRange {
@@ -56,7 +63,7 @@ export class DepthService {
   getApiUrl(from: number, to: number, markets: string[]) {
     const params: Array<string | number> = [from, to]
     if (markets.length) params.push(encodeURIComponent(markets.join('+')))
-    return `${this.url}/${params.join('/')}`
+    return `${this.url}/${params.join('/')}?interval=${DEPTH_INTERVAL_MS}`
   }
 
   private schedule<T>(work: () => Promise<T>, priority: number): Promise<T> {
@@ -108,7 +115,12 @@ export class DepthService {
       new Set(markets.map(market => market.trim()).filter(Boolean))
     ).sort()
     if (!normalizedMarkets.length) return
-    const ranges = splitDepthRange(from, to).reverse()
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from > to)
+      throw new Error('Invalid depth range')
+    const cutoff = getDepthHistoryStart()
+    to = Math.min(to, Date.now() + 60000)
+    if (to <= Math.max(from, cutoff)) return
+    const ranges = splitDepthRange(Math.max(from, cutoff), to).reverse()
     let next = 0
     let failed = false
     const worker = async () => {

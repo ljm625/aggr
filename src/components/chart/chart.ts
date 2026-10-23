@@ -56,7 +56,10 @@ import alertService, {
 import historicalService, {
   HistoricalResponse
 } from '@/services/historicalService'
-import depthService from '@/services/depthService'
+import depthService, {
+  DEPTH_INTERVAL_MS,
+  getDepthHistoryStart
+} from '@/services/depthService'
 
 import seriesUtils from '@/components/chart/serieUtils'
 
@@ -135,6 +138,18 @@ export default class Chart {
   private depthCacheRange: TimeRange = { from: null, to: null }
   private depthSnapshots: { [market: string]: DepthSnapshot[] } = {}
   private _depthDataVersion = 0
+  private _depthRevision = 0
+  private _depthAggregateCache = new Map<
+    number,
+    {
+      snapshots: DepthSnapshot[]
+      referencePrice: number
+      value: DepthSnapshot
+      levels: number
+    }
+  >()
+  private _depthAggregateLevels = 0
+  private _depthRenderTimeout: number | null = null
   private queuedTrades: Trade[] = []
   private historicalMarkets: string[]
   private seriesIndicatorsMap: { [serieId: string]: IndicatorReference } = {}
@@ -964,6 +979,12 @@ export default class Chart {
 
   clearDepthData() {
     this._depthDataVersion++
+    this._depthRevision++
+    this._depthAggregateCache.clear()
+    this._depthAggregateLevels = 0
+    if (this._depthRenderTimeout !== null)
+      window.clearTimeout(this._depthRenderTimeout)
+    this._depthRenderTimeout = null
     this.depthSnapshots = {}
     this.depthCacheRange.from = this.depthCacheRange.to = null
   }
@@ -1404,10 +1425,15 @@ export default class Chart {
       return
     }
 
+    const revision = this._depthRevision
     this._lastDepthRefreshAt = Date.now()
     this._depthRefreshPromise = this.fetchDepth(range)
       .then(() => {
-        if (!this.isLoading && this.chartInstance) {
+        if (
+          revision !== this._depthRevision &&
+          !this.isLoading &&
+          this.chartInstance
+        ) {
           this.renderAll()
         }
       })
@@ -1417,6 +1443,7 @@ export default class Chart {
   }
 
   getDepthSnapshotForMarket(market: string, timestamp: number) {
+    if (timestamp < getDepthHistoryStart() / 1000) return null
     const snapshots = this.depthSnapshots[market]
 
     if (!snapshots || !snapshots.length) {
@@ -1494,24 +1521,31 @@ export default class Chart {
     levels: { [price: string]: number },
     priceStep: number,
     side: 'bid' | 'ask',
-    priceOffset = 0
+    priceOffset = 0,
+    groupTarget?: { [price: string]: number }
   ) {
-    for (const [priceText, value] of Object.entries(levels || {})) {
+    const precision = this.getDepthPriceStepPrecision(priceStep)
+    const factor = Math.pow(10, precision)
+    const scaledStep = Math.round(priceStep * factor)
+    if (!scaledStep) return
+    for (const priceText in levels || {}) {
       const price = +priceText + priceOffset
-      const amount = +value
-
-      if (!isFinite(price) || price <= 0 || !isFinite(amount) || amount <= 0) {
+      const amount = +levels[priceText]
+      if (!isFinite(price) || price <= 0 || !isFinite(amount) || amount <= 0)
         continue
-      }
-
-      const bucketPrice = this.bucketDepthPrice(price, priceStep, side)
-
-      if (!bucketPrice || bucketPrice <= 0) {
-        continue
-      }
-
-      const bucketKey = this.formatDepthPriceKey(bucketPrice, priceStep)
-      target[bucketKey] = (target[bucketKey] || 0) + amount
+      const scaledPrice = Math.round(price * factor)
+      const bucket =
+        side === 'bid'
+          ? Math.floor((scaledPrice + 1e-6) / scaledStep) * scaledStep
+          : Math.ceil((scaledPrice - 1e-6) / scaledStep) * scaledStep
+      const bucketPrice = bucket / factor
+      if (!bucketPrice || bucketPrice <= 0) continue
+      const normalizedPrice = Math.round(bucketPrice * factor) / factor
+      const key = precision
+        ? normalizedPrice.toFixed(precision).replace(/\.?0+$/, '')
+        : Math.round(normalizedPrice).toString()
+      target[key] = (target[key] || 0) + amount
+      if (groupTarget) groupTarget[key] = (groupTarget[key] || 0) + amount
     }
   }
 
@@ -1533,8 +1567,8 @@ export default class Chart {
   sumDepthLevels(levels: { [price: string]: number }) {
     let total = 0
 
-    for (const value of Object.values(levels || {})) {
-      const amount = +value
+    for (const key in levels || {}) {
+      const amount = +levels[key]
 
       if (!isFinite(amount) || amount <= 0) {
         continue
@@ -1635,10 +1669,7 @@ export default class Chart {
         continue
       }
 
-      const snapshot = this.getDepthSnapshotForMarket(
-        market,
-        snapshotTimestamp
-      )
+      const snapshot = this.getDepthSnapshotForMarket(market, snapshotTimestamp)
 
       if (snapshot) {
         snapshots.push(snapshot)
@@ -1668,6 +1699,17 @@ export default class Chart {
 
     const referencePrice = this.getDepthReferencePrice(renderer, snapshots)
 
+    const cached = this._depthAggregateCache.get(renderer.timestamp)
+    if (
+      cached &&
+      cached.referencePrice === referencePrice &&
+      cached.snapshots.length === snapshots.length &&
+      snapshots.every((snapshot, index) => snapshot === cached.snapshots[index])
+    ) {
+      renderer.depth = cached.value
+      return
+    }
+
     const spotDepth: DepthAggregate = {
       mid: 0,
       priceStep,
@@ -1695,47 +1737,34 @@ export default class Chart {
       const alignedMid = snapshot.mid + priceOffset
 
       mid += alignedMid
-      this.mergeDepthLevels(bids, snapshot.bids, priceStep, 'bid', priceOffset)
-      this.mergeDepthLevels(asks, snapshot.asks, priceStep, 'ask', priceOffset)
-
       const marketGroup = this.getDepthMarketGroup(snapshot.market)
-
-      if (marketGroup === 'spot') {
-        spotDepth.mid += alignedMid
-        spotDepth.markets.push(snapshot.market)
-        this.mergeDepthLevels(
-          spotDepth.bids,
-          snapshot.bids,
-          priceStep,
-          'bid',
-          priceOffset
-        )
-        this.mergeDepthLevels(
-          spotDepth.asks,
-          snapshot.asks,
-          priceStep,
-          'ask',
-          priceOffset
-        )
-        spotSnapshotsCount++
-      } else if (marketGroup === 'perp') {
-        perpDepth.mid += alignedMid
-        perpDepth.markets.push(snapshot.market)
-        this.mergeDepthLevels(
-          perpDepth.bids,
-          snapshot.bids,
-          priceStep,
-          'bid',
-          priceOffset
-        )
-        this.mergeDepthLevels(
-          perpDepth.asks,
-          snapshot.asks,
-          priceStep,
-          'ask',
-          priceOffset
-        )
-        perpSnapshotsCount++
+      const group =
+        marketGroup === 'spot'
+          ? spotDepth
+          : marketGroup === 'perp'
+            ? perpDepth
+            : null
+      this.mergeDepthLevels(
+        bids,
+        snapshot.bids,
+        priceStep,
+        'bid',
+        priceOffset,
+        group && group.bids
+      )
+      this.mergeDepthLevels(
+        asks,
+        snapshot.asks,
+        priceStep,
+        'ask',
+        priceOffset,
+        group && group.asks
+      )
+      if (group) {
+        group.mid += alignedMid
+        group.markets.push(snapshot.market)
+        if (marketGroup === 'spot') spotSnapshotsCount++
+        else perpSnapshotsCount++
       }
     }
 
@@ -1764,6 +1793,36 @@ export default class Chart {
       spot,
       perp,
       future: perp
+    }
+
+    // Bound derived data as well as raw history. Repeated full chart renders
+    // can reuse identical books, alignment and market selections.
+    const levels = [
+      bids,
+      asks,
+      spotDepth.bids,
+      spotDepth.asks,
+      perpDepth.bids,
+      perpDepth.asks
+    ].reduce((sum, map) => sum + Object.keys(map).length, 0)
+    if (cached) {
+      this._depthAggregateLevels -= cached.levels
+      this._depthAggregateCache.delete(renderer.timestamp)
+    }
+    this._depthAggregateCache.set(renderer.timestamp, {
+      snapshots,
+      referencePrice,
+      value: renderer.depth,
+      levels
+    })
+    this._depthAggregateLevels += levels
+    while (
+      this._depthAggregateCache.size > 4096 ||
+      this._depthAggregateLevels > 1500000
+    ) {
+      const key = this._depthAggregateCache.keys().next().value
+      this._depthAggregateLevels -= this._depthAggregateCache.get(key).levels
+      this._depthAggregateCache.delete(key)
     }
   }
 
@@ -3104,29 +3163,67 @@ export default class Chart {
     this.initialize()
   }
 
+  depthSnapshotsEqual(left: DepthSnapshot, right: DepthSnapshot) {
+    if (left === right) return true
+    if (
+      left.time !== right.time ||
+      left.mid !== right.mid ||
+      left.priceStep !== right.priceStep ||
+      left.rangePercent !== right.rangePercent
+    )
+      return false
+    for (const side of ['bids', 'asks']) {
+      const a = left[side] || {},
+        b = right[side] || {}
+      if (Object.keys(a).length !== Object.keys(b).length) return false
+      for (const price in a) if (a[price] !== b[price]) return false
+    }
+    return true
+  }
+
   mergeDepthSnapshots(snapshots: DepthSnapshot[]) {
+    const cutoff = getDepthHistoryStart() / 1000
+    const interval = DEPTH_INTERVAL_MS / 1000
     const incoming: { [market: string]: DepthSnapshot[] } = {}
     for (const snapshot of snapshots) {
-      if (!snapshot.market) continue
+      if (!snapshot.market || snapshot.time < cutoff) continue
       if (!incoming[snapshot.market]) incoming[snapshot.market] = []
       incoming[snapshot.market].push(snapshot)
     }
-    for (const market of Object.keys(incoming)) {
+    let changed = false
+    for (const market of new Set([
+      ...Object.keys(this.depthSnapshots),
+      ...Object.keys(incoming)
+    ])) {
+      const existing = this.depthSnapshots[market] || []
       const merged = new Map<number, DepthSnapshot>()
-      for (const snapshot of this.depthSnapshots[market] || []) {
-        merged.set(snapshot.time, snapshot)
+      for (const snapshot of existing) {
+        if (snapshot.time >= cutoff)
+          merged.set(Math.floor(snapshot.time / interval), snapshot)
+        else changed = true
       }
-      for (const snapshot of incoming[market]) {
-        merged.set(snapshot.time, snapshot)
+      for (const snapshot of incoming[market] || []) {
+        const bucket = Math.floor(snapshot.time / interval)
+        const previous = merged.get(bucket)
+        if (previous && previous.time > snapshot.time) continue
+        if (!previous || !this.depthSnapshotsEqual(previous, snapshot)) {
+          merged.set(bucket, snapshot)
+          changed = true
+        }
       }
       this.depthSnapshots[market] = Array.from(merged.values()).sort(
         (a, b) => a.time - b.time
       )
     }
+    if (changed) this._depthRevision++
   }
 
   onDepthSnapshots(snapshots: DepthSnapshot[], range: TimeRange) {
     this.mergeDepthSnapshots(snapshots)
+    range = {
+      from: Math.max(range.from, getDepthHistoryStart() / 1000),
+      to: range.to
+    }
 
     if (
       this.depthCacheRange.from === null ||
@@ -3135,12 +3232,25 @@ export default class Chart {
       this.depthCacheRange.from = range.from
     }
 
-    if (this.depthCacheRange.to === null || range.to > this.depthCacheRange.to) {
+    if (
+      this.depthCacheRange.to === null ||
+      range.to > this.depthCacheRange.to
+    ) {
       this.depthCacheRange.to = range.to
     }
   }
 
-  fetchDepth(range: TimeRange) {
+  scheduleDepthRender() {
+    if (!this.chartInstance || this._depthRenderTimeout !== null) return
+    this._depthRenderTimeout = window.setTimeout(() => {
+      this._depthRenderTimeout = null
+      if (!this.chartInstance) return
+      if (this.isLoading) this.scheduleDepthRender()
+      else this.renderAll()
+    }, 500)
+  }
+
+  fetchDepth(range: TimeRange, renderBatches = false) {
     if (!this.usesDepthSnapshots()) {
       return Promise.resolve()
     }
@@ -3163,6 +3273,7 @@ export default class Chart {
             from: batch.from / 1000,
             to: batch.to / 1000
           })
+          if (renderBatches && snapshots.length) this.scheduleDepthRender()
         },
         () => version !== this._depthDataVersion
       )
@@ -3259,17 +3370,17 @@ export default class Chart {
 
     this.isLoading = true
 
-    return Promise.all([
-      historicalService
-        .fetch(
-          rangeToFetch.from * 1000,
-          rangeToFetch.to * 1000,
-          timeframe,
-          this.historicalMarkets
-        )
-        .then(results => this.onHistorical(results, false)),
-      this.fetchDepth(rangeToFetch)
-    ])
+    // Depth fills in as each day arrives; ordinary chart loading must not
+    // wait for the entire month of depth history.
+    this.fetchDepth(rangeToFetch, true)
+    return historicalService
+      .fetch(
+        rangeToFetch.from * 1000,
+        rangeToFetch.to * 1000,
+        timeframe,
+        this.historicalMarkets
+      )
+      .then(results => this.onHistorical(results, false))
       .then(() => this.renderAll(true))
       .catch(err => {
         console.error(err)

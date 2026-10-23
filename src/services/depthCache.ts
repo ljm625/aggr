@@ -1,4 +1,5 @@
 import { DBSchema, IDBPDatabase, openDB } from 'idb'
+import { gzip, ungzip } from 'pako'
 
 interface DepthCacheEntry {
   key: string
@@ -20,7 +21,32 @@ export interface DepthResponseCache {
 
 const MAX_CACHE_BYTES = 384 * 1024 * 1024
 const MAX_CACHE_ENTRIES = 40
-const CACHE_LIFETIME = 7 * 86400000
+const CACHE_LIFETIME = 30 * 86400000
+
+// Native streams compress off the main thread. Pako supports browsers without
+// these APIs; both formats use standard gzip and can be read interchangeably.
+export async function compressDepth(text: string): Promise<Blob> {
+  const NativeCompression = (globalThis as any).CompressionStream
+  if (NativeCompression) {
+    const stream = new Blob([text])
+      .stream()
+      .pipeThrough(new NativeCompression('gzip'))
+    const body = await new Response(stream).blob()
+    return new Blob([body], { type: 'application/gzip' })
+  }
+  return new Blob([gzip(text)], { type: 'application/gzip' })
+}
+
+export async function decompressDepth(body: Blob): Promise<string> {
+  if (body.type !== 'application/gzip') return body.text()
+  const NativeDecompression = (globalThis as any).DecompressionStream
+  if (NativeDecompression) {
+    return new Response(
+      body.stream().pipeThrough(new NativeDecompression('gzip'))
+    ).text()
+  }
+  return ungzip(new Uint8Array(await body.arrayBuffer()), { to: 'string' })
+}
 
 // Derived depth data is separate from workspace settings. A denied/full
 // database must never prevent charts from fetching network data.
@@ -32,9 +58,11 @@ class DepthCache implements DepthResponseCache {
       this.database =
         typeof indexedDB === 'undefined'
           ? Promise.resolve(null)
-          : openDB<DepthCacheDB>('aggr-depth-cache', 1, {
-              upgrade(db) {
-                db.createObjectStore('responses', { keyPath: 'key' })
+          : openDB<DepthCacheDB>('aggr-depth-cache', 2, {
+              upgrade(db, oldVersion, _newVersion, tx) {
+                if (!oldVersion)
+                  db.createObjectStore('responses', { keyPath: 'key' })
+                else tx.objectStore('responses').clear()
               }
             }).catch(() => null)
     }
@@ -51,7 +79,7 @@ class DepthCache implements DepthResponseCache {
         await db.delete('responses', key)
         return null
       }
-      return await entry.body.text()
+      return await decompressDepth(entry.body)
     } catch (_error) {
       return null
     }
@@ -61,7 +89,7 @@ class DepthCache implements DepthResponseCache {
     try {
       const db = await this.open()
       if (!db) return
-      const body = new Blob([text], { type: 'application/json' })
+      const body = await compressDepth(text)
       if (body.size > MAX_CACHE_BYTES) return
       const now = Date.now()
       const entry = {
