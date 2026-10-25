@@ -233,6 +233,37 @@ test('depth aggregation preserves totals/groups and invalidates when price or th
   assert.ok(chart._depthAggregateLevels>0)
 })
 
+test('heatmap books stay at exchange prices while aligned depth follows the candle', () => {
+  const chart=makeChart(),time=end/1000-300
+  chart.mergeDepthSnapshots([snapshot(time), {...snapshot(time,'PERP:BTC'),mid:102,bids:{101:4},asks:{103:5}}])
+  const renderer={timestamp:time,sources:{'SPOT:BTC':{active:true},'PERP:BTC':{active:true}},bar:{close:110},series:{}}
+  chart.syncRendererDepth(renderer)
+  assert.equal(renderer.depth.spotBook.bids['99'],2)
+  assert.equal(renderer.depth.perpBook.bids['101'],4)
+  assert.equal(renderer.depth.spot.bids['109'],2)
+  renderer.bar.close=120
+  chart.syncRendererDepth(renderer)
+  assert.equal(renderer.depth.spotBook.bids['99'],2)
+  assert.equal(renderer.depth.perpBook.bids['101'],4)
+  assert.equal(renderer.depth.spot.bids['119'],2)
+})
+
+test('adding the first depth indicator backfills the price history already on the chart', () => {
+  const requests=[]
+  const settings={libraryId:'orderbook-heatmap-spot',script:'bar.depth.spotBook',options:{}}
+  const add=chartMethod('addIndicator',{store_1:{default:{state:{test:{indicators:{first:settings,second:settings}}}}}})
+  const chart={paneId:'test',loadedIndicators:[],getLoadedIndicator:()=>null,prepareIndicator:()=>{},
+    usesDepthSnapshots:chartMethod('usesDepthSnapshots'),chartCache:{cacheRange:{from:1000,to:2000}},
+    activeRenderer:{timestamp:2100},timeframe:60,fetchDepth:(range,batches)=>requests.push({range,batches})}
+  assert.equal(add.call(chart,'first'),true)
+  assert.equal(requests.length,1)
+  assert.equal(requests[0].range.from,1000)
+  assert.equal(requests[0].range.to,2160)
+  assert.equal(requests[0].batches,true)
+  add.call(chart,'second')
+  assert.equal(requests.length,1)
+})
+
 test('optimized bucket merging matches original rounding across fractional steps, offsets and invalid levels', () => {
   const chart=makeChart()
   for(const step of [50,1,0.01,0.00003]) for(const offset of [-0.00004,0,0.00004,50.1234]) for(const side of ['bid','ask']) {

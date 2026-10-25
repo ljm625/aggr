@@ -40,6 +40,9 @@ export interface DepthSnapshot extends DepthAggregate {
   spot?: DepthAggregate | null
   perp?: DepthAggregate | null
   future?: DepthAggregate | null
+  // Fixed exchange price levels for liquidity heatmaps (no mid-price alignment).
+  spotBook?: DepthAggregate | null
+  perpBook?: DepthAggregate | null
 }
 
 export type MarketsBars = {

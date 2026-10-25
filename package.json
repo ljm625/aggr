@@ -7,7 +7,7 @@
     "cors": "node scripts/cors-server.mjs",
     "svg2font": "node scripts/svg2font.js",
     "serve": "vite --host",
-    "test:depth": "node --test tests/depthService.test.cjs",
+    "test:depth": "node --test tests/depthService.test.cjs tests/orderbookHeatmap.test.cjs",
     "prod": "vue-tsc --noEmit && vite build --dest ./temp && rimraf ./dist && mv ./temp ./dist",
     "build": "vite build",
     "lint": "eslint",

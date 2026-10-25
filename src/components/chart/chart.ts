@@ -669,8 +669,28 @@ export default class Chart {
       return false
     }
 
+    // A heatmap added after price history has loaded also needs that history's
+    // depth, rather than waiting for another pan or only fetching recent books.
+    const hadDepthIndicators = this.usesDepthSnapshots()
     // build complete
     this.loadedIndicators.push(indicator)
+    if (
+      !hadDepthIndicators &&
+      this.usesDepthSnapshots() &&
+      this.chartCache.cacheRange.from !== null
+    ) {
+      this.fetchDepth(
+        {
+          from: this.chartCache.cacheRange.from,
+          to:
+            Math.max(
+              this.chartCache.cacheRange.to || 0,
+              this.activeRenderer ? this.activeRenderer.timestamp : 0
+            ) + (this.timeframe || 60)
+        },
+        true
+      )
+    }
 
     return true
   }
@@ -1335,8 +1355,9 @@ export default class Chart {
   usesDepthSnapshots() {
     return this.loadedIndicators.some(
       indicator =>
-        indicator.libraryId === 'orderbook-heatmap' ||
-        /bar\.depth|renderer\.depth/.test(indicator.script || '')
+        /^orderbook-heatmap(?:-(?:spot|perp))?$/.test(
+          indicator.libraryId || ''
+        ) || /bar\.depth|renderer\.depth/.test(indicator.script || '')
     )
   }
 
@@ -1726,6 +1747,18 @@ export default class Chart {
       rangePercent,
       markets: []
     }
+    const spotBook: DepthAggregate = {
+      ...spotDepth,
+      bids: {},
+      asks: {},
+      markets: []
+    }
+    const perpBook: DepthAggregate = {
+      ...perpDepth,
+      bids: {},
+      asks: {},
+      markets: []
+    }
     let spotSnapshotsCount = 0
     let perpSnapshotsCount = 0
 
@@ -1761,6 +1794,11 @@ export default class Chart {
         group && group.asks
       )
       if (group) {
+        const book = marketGroup === 'spot' ? spotBook : perpBook
+        this.mergeDepthLevels(book.bids, snapshot.bids, priceStep, 'bid')
+        this.mergeDepthLevels(book.asks, snapshot.asks, priceStep, 'ask')
+        book.mid += snapshot.mid
+        book.markets.push(snapshot.market)
         group.mid += alignedMid
         group.markets.push(snapshot.market)
         if (marketGroup === 'spot') spotSnapshotsCount++
@@ -1792,7 +1830,9 @@ export default class Chart {
         .filter(market => typeof market === 'string'),
       spot,
       perp,
-      future: perp
+      future: perp,
+      spotBook: this.finalizeDepthAggregate(spotBook, spotSnapshotsCount),
+      perpBook: this.finalizeDepthAggregate(perpBook, perpSnapshotsCount)
     }
 
     // Bound derived data as well as raw history. Repeated full chart renders
@@ -1803,7 +1843,11 @@ export default class Chart {
       spotDepth.bids,
       spotDepth.asks,
       perpDepth.bids,
-      perpDepth.asks
+      perpDepth.asks,
+      spotBook.bids,
+      spotBook.asks,
+      perpBook.bids,
+      perpBook.asks
     ].reduce((sum, map) => sum + Object.keys(map).length, 0)
     if (cached) {
       this._depthAggregateLevels -= cached.levels

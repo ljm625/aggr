@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import { joinRgba, mix, splitColorCode } from '@/utils/colors'
 import { IndicatorFunction } from './chart.d'
+import { orderbookHeatmap } from './orderbookHeatmap'
 
 /**
  * Close ohlc bar (all props to close value for smooth transition, but also fake opens)
@@ -93,6 +94,7 @@ function accumulateStoch(fn: IndicatorFunction) {
 // - a state object (the memory of the function, it's optional but most have one)
 // - a next function (called when on new bar - usualy to mutate the state and store current value somewhere safe)
 export default {
+  orderbookHeatmap,
   /**
    * produce averaged ohlc of active sources bars contained in the renderer bar
    * use classic aggr printing (last close = next open)

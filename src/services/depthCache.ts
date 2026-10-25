@@ -58,11 +58,11 @@ class DepthCache implements DepthResponseCache {
       this.database =
         typeof indexedDB === 'undefined'
           ? Promise.resolve(null)
-          : openDB<DepthCacheDB>('aggr-depth-cache', 2, {
-              upgrade(db, oldVersion, _newVersion, tx) {
-                if (!oldVersion)
-                  db.createObjectStore('responses', { keyPath: 'key' })
-                else tx.objectStore('responses').clear()
+          : openDB<DepthCacheDB>('aggr-depth-cache-gzip', 1, {
+              upgrade(db) {
+                // A separate database avoids an upgrade waiting indefinitely
+                // for older app tabs to release their raw-cache connection.
+                db.createObjectStore('responses', { keyPath: 'key' })
               }
             }).catch(() => null)
     }
